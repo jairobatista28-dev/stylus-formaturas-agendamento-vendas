@@ -1,0 +1,29 @@
+[functions.ai-chat]
+verify_jwt = true
+
+[functions.campaign-dispatcher]
+verify_jwt = false
+
+[functions.campaign-followup]
+verify_jwt = false
+
+[functions.campanha-processor]
+verify_jwt = false
+
+[functions.evolution-proxy]
+verify_jwt = false
+
+[functions.import-alunos]
+verify_jwt = true
+
+[functions.process-message]
+verify_jwt = false
+
+[functions.send-campaign]
+verify_jwt = false
+
+[functions.uazapi-webhook]
+verify_jwt = false
+
+[functions.whatsapp-webhook]
+verify_jwt = false
