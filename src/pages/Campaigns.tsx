@@ -242,7 +242,7 @@ export function Campaigns() {
       // 3. Busca todos os contatos da campanha (com UUIDs reais)
       const { data: contatosComUUID, error: fetchError } = await supabase
         .from('contatos_campanha')
-        .select('id, telefone, nome')
+        .select('id, telefone, nome, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem')
         .eq('campanha_id', campanha.id)
         .eq('status', 'aguardando_inicio');
 
@@ -256,10 +256,20 @@ export function Campaigns() {
       const textoDatasFormatado = formatarDatasDisponiveis(campanha.opcoes_agendamento || [], campanha.tipo_atendimento || 'visita_externa');
 
       for (const contato of contatosComUUID) {
-        const mensagemPersonalizada = campanha.mensagem_inicial
+        let mensagemPersonalizada = campanha.mensagem_inicial
           .replace(/\{\{nome\}\}/gi, contato.nome)
           .replace(/{nome}/gi, contato.nome)
           .replace(/\{datas_disponiveis\}/gi, textoDatasFormatado);
+
+        if ((campanha as any).tipo_atendimento === 'venda_material') {
+          mensagemPersonalizada = mensagemPersonalizada
+            .replace(/\{numero_contrato\}/gi, contato.numero_contrato || 'Nao informado')
+            .replace(/\{valor_tabela\}/gi, contato.valor_tabela != null ? String(contato.valor_tabela) : 'valor sob consulta')
+            .replace(/\{valor_oferecido\}/gi, contato.valor_oferecido != null ? String(contato.valor_oferecido) : 'valor sob consulta')
+            .replace(/\{formas_pagamento\}/gi, contato.formas_pagamento || 'consulte as opcoes disponiveis')
+            .replace(/\{opcoes_plano\}/gi, contato.opcoes_plano || 'consulte as opcoes disponiveis')
+            .replace(/\{prazo_reciclagem\}/gi, contato.prazo_reciclagem || 'em breve');
+        }
 
         const blocos = parseMensagemCampanha(mensagemPersonalizada, contato.nome);
 
