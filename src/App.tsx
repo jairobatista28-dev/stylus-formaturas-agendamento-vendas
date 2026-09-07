@@ -8,6 +8,7 @@ import { CampaignDetail } from './pages/CampaignDetail';
 import { WhatsAppUnified } from './pages/WhatsAppUnified';
 import { WhatsAppAI } from './pages/WhatsAppAI';
 import { WhatsAppManual } from './pages/WhatsAppManual';
+import { VendasPendentes } from './pages/VendasPendentes';
 import { UserConfig } from './pages/UserConfig';
 import { fetchSettingsFromSupabase } from './lib/uazapi';
 
@@ -27,6 +28,7 @@ function App() {
           <Route path="/whatsapp" element={<WhatsAppUnified />} />
           <Route path="/whatsapp/ai" element={<WhatsAppAI />} />
           <Route path="/whatsapp/manual" element={<WhatsAppManual />} />
+          <Route path="/vendas-pendentes" element={<VendasPendentes />} />
           <Route path="/users" element={<UserConfig />} />
         </Route>
       </Routes>

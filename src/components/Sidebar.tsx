@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight as ChevronRightIcon,
   Upload,
+  ShoppingCart,
 } from 'lucide-react';
 
 const AVATAR_STORAGE_KEY = 'stylus-admin-avatar';
@@ -97,6 +98,15 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         >
           <MessageCircle size={20} />
           {!collapsed && <span>WhatsApp</span>}
+        </NavLink>
+
+        <NavLink
+          to="/vendas-pendentes"
+          className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+          title={collapsed ? 'Vendas Pendentes' : undefined}
+        >
+          <ShoppingCart size={20} />
+          {!collapsed && <span>Vendas Pendentes</span>}
         </NavLink>
 
         <NavLink
