@@ -13,6 +13,11 @@ export interface ContatoCampanha {
   curso?: string;
   numero_contrato?: string;
   data?: string;
+  valor_tabela?: string | number;
+  valor_oferecido?: string | number;
+  formas_pagamento?: string;
+  opcoes_plano?: string;
+  prazo_reciclagem?: string;
 }
 
 export interface Campanha {
@@ -24,7 +29,7 @@ export interface Campanha {
   status: string;
   criado_em: string;
   contatos: ContatoCampanha[];
-  tipo_atendimento?: 'visita_externa' | 'escritorio';
+  tipo_atendimento?: 'visita_externa' | 'escritorio' | 'venda_material';
   opcoes_agendamento?: Array<{ data: string; turnos: string[]; horarios?: string[] }>;
 }
 
@@ -127,12 +132,17 @@ export async function createCampanha(
         local: c.local || null,
         curso: c.curso || null,
         numero_contrato: c.numero_contrato || null,
+        valor_tabela: c.valor_tabela || null,
+        valor_oferecido: c.valor_oferecido || null,
+        formas_pagamento: c.formas_pagamento || null,
+        opcoes_plano: c.opcoes_plano || null,
+        prazo_reciclagem: c.prazo_reciclagem || null,
       }));
 
       const { data: contatosInseridos, error: contatosError } = await supabase
         .from('contatos_campanha')
         .insert(contatosParaInserir)
-        .select('id, nome, telefone, status, local, curso, numero_contrato');
+        .select('id, nome, telefone, status, local, curso, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem');
 
       if (contatosError) {
         console.warn('[Storage] Error saving contacts to Supabase:', contatosError);
@@ -156,6 +166,11 @@ export async function createCampanha(
           local: c.local,
           curso: c.curso,
           numero_contrato: c.numero_contrato,
+          valor_tabela: c.valor_tabela,
+          valor_oferecido: c.valor_oferecido,
+          formas_pagamento: c.formas_pagamento,
+          opcoes_plano: c.opcoes_plano,
+          prazo_reciclagem: c.prazo_reciclagem,
         })),
       });
       saveLocalCampanhas(localCampanhas);
@@ -190,6 +205,11 @@ export async function createCampanha(
       local: c.local,
       curso: c.curso,
       numero_contrato: c.numero_contrato,
+      valor_tabela: c.valor_tabela,
+      valor_oferecido: c.valor_oferecido,
+      formas_pagamento: c.formas_pagamento,
+      opcoes_plano: c.opcoes_plano,
+      prazo_reciclagem: c.prazo_reciclagem,
     }));
 
     const newCampanha: Campanha = {

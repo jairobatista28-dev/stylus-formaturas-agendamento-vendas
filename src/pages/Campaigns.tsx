@@ -45,7 +45,7 @@ const ESCRITORIO_HORARIOS_TARDE = ['13:00', '14:00', '15:00', '16:00', '17:00'];
 
 const ESCRITORIO_ENDERECO = 'Escritorio - Rua Judith Motta, Parque 10 de Novembro, Manaus - AM, CEP 69055-280';
 
-type TipoAtendimento = 'visita_externa' | 'escritorio';
+type TipoAtendimento = 'visita_externa' | 'escritorio' | 'venda_material';
 
 type OpcaoAgendamento = { data: string; turnos: string[]; horarios?: string[] };
 
@@ -414,6 +414,11 @@ export function Campaigns() {
     const cursoIdx = headers.findIndex((h) => h.includes('curso') || h.includes('curso'));
     const contratoIdx = headers.findIndex((h) => h.includes('contrato') || h.includes('numero_contrato') || h.includes('numero contrato'));
     const dataIdx = headers.findIndex((h) => h === 'data' || h.includes('data '));
+    const valorTabelaIdx = headers.findIndex((h) => h.includes('valor_tabela') || h.includes('valor tabela'));
+    const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido'));
+    const formasPagamentoIdx = headers.findIndex((h) => h.includes('formas_pagamento') || h.includes('formas de pagamento') || h.includes('pagamento'));
+    const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
+    const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem'));
 
     if (nomeIdx === -1 || telefoneIdx === -1) {
       const foundHeaders = rawHeaders.join(', ');
@@ -423,7 +428,7 @@ export function Campaigns() {
       throw new Error(`Colunas obrigatorias nao encontradas: ${missing.join(', ')}\n\nCabecalhos encontrados: ${foundHeaders}`);
     }
 
-    const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string }> = [];
+    const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string }> = [];
 
     for (let i = 1; i < lines.length; i++) {
       try {
@@ -443,6 +448,11 @@ export function Campaigns() {
           curso: cursoIdx !== -1 ? (values[cursoIdx] || undefined) : undefined,
           numero_contrato: contratoIdx !== -1 ? (values[contratoIdx] || undefined) : undefined,
           data: dataIdx !== -1 ? (values[dataIdx] || undefined) : undefined,
+          valor_tabela: valorTabelaIdx !== -1 ? (values[valorTabelaIdx] || undefined) : undefined,
+          valor_oferecido: valorOferecidoIdx !== -1 ? (values[valorOferecidoIdx] || undefined) : undefined,
+          formas_pagamento: formasPagamentoIdx !== -1 ? (values[formasPagamentoIdx] || undefined) : undefined,
+          opcoes_plano: opcoesPlanoIdx !== -1 ? (values[opcoesPlanoIdx] || undefined) : undefined,
+          prazo_reciclagem: prazoReciclagemIdx !== -1 ? (values[prazoReciclagemIdx] || undefined) : undefined,
         });
       } catch (lineErr) {
         console.warn(`Error parsing line ${i + 1}:`, lineErr);
@@ -487,6 +497,11 @@ export function Campaigns() {
       const cursoIdx = headers.findIndex((h) => h.includes('curso'));
       const contratoIdx = headers.findIndex((h) => h.includes('contrato') || h.includes('numero_contrato'));
       const dataIdx = headers.findIndex((h) => h === 'data' || h.includes('data '));
+      const valorTabelaIdx = headers.findIndex((h) => h.includes('valor_tabela') || h.includes('valor tabela'));
+      const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido'));
+      const formasPagamentoIdx = headers.findIndex((h) => h.includes('formas_pagamento') || h.includes('formas de pagamento') || h.includes('pagamento'));
+      const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
+      const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem'));
 
       if (nomeIdx === -1 || telefoneIdx === -1) {
         const foundHeaders = rawHeaders.join(', ');
@@ -496,7 +511,7 @@ export function Campaigns() {
         throw new Error(`Colunas obrigatorias nao encontradas: ${missing.join(', ')}.\n\nCabecalhos encontrados: ${foundHeaders}`);
       }
 
-      const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string }> = [];
+      const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string }> = [];
 
       for (let i = 1; i < jsonData.length; i++) {
         const values = jsonData[i] || [];
@@ -515,6 +530,11 @@ export function Campaigns() {
           curso: cursoIdx !== -1 ? String(values[cursoIdx] || '') || undefined : undefined,
           numero_contrato: contratoIdx !== -1 ? String(values[contratoIdx] || '') || undefined : undefined,
           data: dataIdx !== -1 ? String(values[dataIdx] || '') || undefined : undefined,
+          valor_tabela: valorTabelaIdx !== -1 ? String(values[valorTabelaIdx] || '') || undefined : undefined,
+          valor_oferecido: valorOferecidoIdx !== -1 ? String(values[valorOferecidoIdx] || '') || undefined : undefined,
+          formas_pagamento: formasPagamentoIdx !== -1 ? String(values[formasPagamentoIdx] || '') || undefined : undefined,
+          opcoes_plano: opcoesPlanoIdx !== -1 ? String(values[opcoesPlanoIdx] || '') || undefined : undefined,
+          prazo_reciclagem: prazoReciclagemIdx !== -1 ? String(values[prazoReciclagemIdx] || '') || undefined : undefined,
         });
       }
 
@@ -846,10 +866,43 @@ export function Campaigns() {
                       />
                       <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Atendimento no Escritorio</span>
                     </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="tipoAtendimento"
+                        value="venda_material"
+                        checked={tipoAtendimento === 'venda_material'}
+                        onChange={() => {
+                          setTipoAtendimento('venda_material');
+                          setOpcoesAgendamento([]);
+                        }}
+                        className="w-4 h-4"
+                      />
+                      <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Venda de Material Fotografico</span>
+                    </label>
                   </div>
                 </div>
 
+                {tipoAtendimento === 'venda_material' && (
+                  <div className="space-y-2 p-3 rounded-lg" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border)' }}>
+                    <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                      Nesse tipo de campanha, o valor e as condicoes de cada formando vem da propria
+                      planilha (nao ha datas/horarios). Inclua na planilha, alem de nome e telefone,
+                      as colunas: <strong>valor_tabela</strong>, <strong>valor_oferecido</strong>,{' '}
+                      <strong>formas_pagamento</strong>, <strong>opcoes_plano</strong> e{' '}
+                      <strong>prazo_reciclagem</strong> (esta ultima pode ser o mesmo texto pra todos,
+                      ex: "31/10/2026").
+                    </p>
+                    <p className="text-xs mt-1" style={{ color: 'var(--info)' }}>
+                      Dica: use {`{valor_tabela}`}, {`{valor_oferecido}`}, {`{formas_pagamento}`},{' '}
+                      {`{opcoes_plano}`} e {`{prazo_reciclagem}`} na mensagem inicial e no prompt da IA
+                      para personalizar por contrato.
+                    </p>
+                  </div>
+                )}
+
                 {/* Dates and Times */}
+                {tipoAtendimento !== 'venda_material' && (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
@@ -1000,6 +1053,7 @@ export function Campaigns() {
                     </div>
                   )}
                 </div>
+                )}
 
                 {/* Preview Blocks */}
                 {previewBlocks.length > 0 && (

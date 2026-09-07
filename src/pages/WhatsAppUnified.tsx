@@ -21,11 +21,12 @@ import { ToastContainer } from '../components/Toast';
 import { WhatsAppConnection } from '../components/WhatsAppConnection';
 import type { Contact, Message, MessageTemplate, AppSettings } from '../types';
 
-type ContactFilter = 'todos' | 'ia' | 'manual' | 'aguarda';
+type ContactFilter = 'todos' | 'ia' | 'manual' | 'aguarda' | 'vendas';
 
 interface ContactWithLastMsg extends Contact {
   lastMessage?: Message;
   lastAppointment?: { date: string; shift: string; status: string };
+  tipo_atendimento_campanha?: string;
 }
 
 export function WhatsAppUnified() {
@@ -369,12 +370,16 @@ const fetchContacts = async (silent = false) => {
       const contactPhones = (contactsData as Contact[]).map((c) => c.phone);
       const { data: campanhaContatos } = await supabase
         .from('contatos_campanha')
-        .select('telefone, numero_contrato, curso')
+        .select('telefone, numero_contrato, curso, campanhas(tipo_atendimento)')
         .in('telefone', contactPhones);
 
-      const campanhaByPhone = new Map<string, { numero_contrato: string | null; curso: string | null }>();
-      (campanhaContatos || []).forEach((cc) => {
-        campanhaByPhone.set(cc.telefone, cc);
+      const campanhaByPhone = new Map<string, { numero_contrato: string | null; curso: string | null; tipo_atendimento?: string }>();
+      (campanhaContatos || []).forEach((cc: any) => {
+        campanhaByPhone.set(cc.telefone, {
+          numero_contrato: cc.numero_contrato,
+          curso: cc.curso,
+          tipo_atendimento: cc.campanhas?.tipo_atendimento,
+        });
       });
 
       const contactsWithMsgs = (contactsData as Contact[]).map((contact) => {
@@ -383,6 +388,7 @@ const fetchContacts = async (silent = false) => {
           ...contact,
           contract_number: contact.contract_number || campanhaData?.numero_contrato || undefined,
           course: contact.course || campanhaData?.curso || undefined,
+          tipo_atendimento_campanha: campanhaData?.tipo_atendimento,
           lastMessage: lastMsgByContact.get(contact.id),
           lastAppointment: lastAptByContact.get(contact.id),
         };
@@ -512,7 +518,8 @@ const fetchContacts = async (silent = false) => {
         contactFilter === 'todos' ||
         (contactFilter === 'ia' && c.assigned_to === 'ia') ||
         (contactFilter === 'manual' && c.assigned_to === 'manual') ||
-        (contactFilter === 'aguarda' && c.status === 'lead');
+        (contactFilter === 'aguarda' && c.status === 'lead') ||
+        (contactFilter === 'vendas' && c.tipo_atendimento_campanha === 'venda_material');
 
     const matchesSearch =
   !contactSearch || (c.name || '').toLowerCase().includes(contactSearch.toLowerCase());
@@ -747,7 +754,7 @@ const formatTime = (dateStr: string) => {
           >
             <div className="p-3 space-y-2">
               <div className="flex gap-1 items-center">
-                {(['todos', 'ia', 'manual', 'aguarda'] as ContactFilter[]).map((f) => (
+                {(['todos', 'ia', 'manual', 'aguarda', 'vendas'] as ContactFilter[]).map((f) => (
                   <button
                     key={f}
                     onClick={() => setContactFilter(f)}
