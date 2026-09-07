@@ -480,6 +480,15 @@ Voce e uma assistente de vendas calorosa e humana, falando com ${nomeContato}, q
 formando(a) e ja teve contato anterior com a empresa. Seu objetivo e conduzir, com empatia
 e argumentacao real, ate a decisao de compra do material fotografico da formatura dele(a).
 
+## CONTEXTO REAL DESSA CAMPANHA (use isso pra dar peso genuino a urgencia, sem exagerar)
+Esse formando ja teve uma oportunidade anterior de adquirir o material fotografico da
+formatura dele(a) e, por algum motivo, nao finalizou. Essa campanha promocional existe
+justamente porque a empresa esta dando essa segunda (e ultima) chance antes do material
+entrar no processo de reciclagem/descarte definitivo - depois disso, nao ha como recuperar
+as fotos. Por isso os valores estao abaixo da tabela normal: e uma condicao criada
+especificamente pra quem ainda nao retirou o material, nao uma promocao generica. Trate essa
+urgencia como um fato real da situacao dele(a), nunca como um gatilho de pressao artificial.
+
 ## DADOS DESTE CONTRATO (use exatamente estes valores, nunca invente outros)
 Nome: ${nomeContato}
 Numero do contrato: ${dadosVenda?.numero_contrato || 'Nao informado'}
@@ -879,378 +888,386 @@ serve(async (req) => {
         });
       }
 
-      case 'resposta_recebida': {
-        const { telefone, campanha_id, texto_resposta } = body;
+case 'resposta_recebida': {
+  const { telefone, campanha_id, texto_resposta } = body;
 
-        if (!telefone || !texto_resposta) {
-          return new Response(JSON.stringify({ error: 'telefone e texto_resposta obrigatorios' }), {
-            status: 400,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
-        }
+  if (!telefone || !texto_resposta) {
+    return new Response(JSON.stringify({ error: 'telefone e texto_resposta obrigatorios' }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
 
-        const { data: conversa } = await sb
-          .from('conversa_estado')
-          .select('*, campanhas(*)')
-          .eq('contato_telefone', telefone)
-          .eq('aguardando_resposta', true)
-          .maybeSingle();
+  const { data: conversa } = await sb
+    .from('conversa_estado')
+    .select('*, campanhas(*)')
+    .eq('contato_telefone', telefone)
+    .eq('aguardando_resposta', true)
+    .maybeSingle();
 
-        if (!conversa) {
-          console.log(`[Processor] Nenhuma conversa aguardando resposta para ${telefone}`);
-          return new Response(JSON.stringify({ message: 'Sem conversa ativa' }), {
-            status: 200,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
-        }
+  if (!conversa) {
+    console.log(`[Processor] Nenhuma conversa aguardando resposta para ${telefone}`);
+    return new Response(JSON.stringify({ message: 'Sem conversa ativa' }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
 
-        const campanha = conversa.campanhas as any;
-        const nome = conversa.contato_nome || 'Formando';
+  const campanha = conversa.campanhas as any;
+  const nome = conversa.contato_nome || 'Formando';
 
-        console.log(`[Processor] Resposta recebida de ${nome}: ${texto_resposta}`);
+  console.log(`[Processor] Resposta recebida de ${nome}: ${texto_resposta}`);
 
-        // Busca dados completos do contato na campanha (nome, contrato, curso, endereco)
-        const { data: contatoCampanhaData } = await sb
+  // Busca dados completos do contato na campanha (nome, contrato, curso, endereco)
+  const { data: contatoCampanhaData } = await sb
+    .from('contatos_campanha')
+    .select('id, nome, numero_contrato, curso, local, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem')
+    .eq('campanha_id', campanha.id)
+    .eq('telefone', telefone)
+    .maybeSingle();
+
+  const dadosContato = contatoCampanhaData || {};
+  const nomeCompleto = dadosContato.nome || nome;
+
+  // Busca ou cria contact_id (necessario para historico e agendamento)
+  const { data: contatoDb } = await sb
+    .from('contacts')
+    .select('id, assigned_to')
+    .eq('phone', telefone)
+    .maybeSingle();
+
+  let contactId = contatoDb?.id;
+
+  // VERIFICACAO DE MODO MANUAL: se o contato esta em modo manual, salva a mensagem recebida mas nao chama a IA
+  if (contatoDb?.assigned_to === 'manual') {
+    console.log(`[Processor] Contato ${telefone} em modo manual - salvando mensagem sem acionar IA`);
+    await sb.from('messages').insert({
+      contact_id: contatoDb.id,
+      direction: 'in',
+      content: texto_resposta,
+      sent_by: 'contato',
+      seq: 0,
+    });
+    return new Response(JSON.stringify({ success: true, skipped: true, reason: 'manual_mode' }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+
+  if (!contactId) {
+    const { data: novoContato } = await sb
+      .from('contacts')
+      .insert({ phone: telefone, name: nome, status: 'lead', assigned_to: 'ia' })
+      .select('id')
+      .single();
+    contactId = novoContato?.id;
+  }
+
+  // Salva mensagem recebida do formando
+  if (contactId) {
+    await sb.from('messages').insert({
+      contact_id: contactId,
+      direction: 'in',
+      content: texto_resposta,
+      sent_by: 'contato',
+      seq: 0,
+    });
+  }
+
+  // Busca historico para dar contexto real a IA
+  let history: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+  let textosFormando: string[] = [];
+  if (contactId) {
+    const { data: mensagens } = await sb
+      .from('messages')
+      .select('*')
+      .eq('contact_id', contactId)
+      .order('created_at', { ascending: true })
+      .limit(20);
+
+    textosFormando = (mensagens || []).filter((m: any) => m.direction === 'in').map((m: any) => (m.content || '').toLowerCase());
+
+    history = (mensagens || []).map((m: any) => ({
+      role: m.direction === 'in' ? 'user' : 'model',
+      parts: [{ text: m.content }],
+    }));
+
+    // Remove a mensagem que acabou de ser inserida (sera enviada separadamente ao chat)
+    if (history.length > 0 && history[history.length - 1].role === 'user') {
+      history.pop();
+    }
+
+    // Gemini exige que o historico comece com 'user'
+    while (history.length > 0 && history[0].role !== 'user') {
+      history.shift();
+    }
+  }
+
+  // Se ja existe agendamento, reforca isso no prompt para a IA nao repetir a pergunta
+  let contextoAgendamento = '';
+  if (contactId) {
+    const { data: agendamentoRecente } = await sb
+      .from('appointments')
+      .select('date, shift, location')
+      .eq('contact_id', contactId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (agendamentoRecente) {
+      contextoAgendamento = `ATENCAO - ESTADO ATUAL: Este formando JA TEM uma visita confirmada para ${agendamentoRecente.date} no turno ${agendamentoRecente.shift}, endereco ${agendamentoRecente.location || 'Nao informado'}. NAO reinicie a apresentacao nem ofereca novas datas. Se ele pedir explicitamente para mudar, trate como reagendamento dentro das opcoes validas.`;
+    }
+  }
+
+  const respostaIA = await chamarGemini(
+    sb,
+    campanha.prompt_ia || '',
+    campanha.base_conhecimento || '',
+    texto_resposta,
+    nome,
+    campanha.opcoes_agendamento || [],
+    history,
+    contextoAgendamento,
+    campanha.tipo_atendimento || 'visita_externa',
+    dadosContato as DadosVenda
+  );
+
+  if (respostaIA) {
+    let novoStatus = 'em_conversa';
+
+    // TRAVA DE SEGURANCA: verificar se a etapa de confirmacao de endereco aconteceu
+    let etapaEnderecoOk = false;
+    if (contactId) {
+      const { data: msgsEndereco } = await sb
+        .from('messages')
+        .select('content')
+        .eq('contact_id', contactId)
+        .eq('direction', 'out')
+        .eq('sent_by', 'ia')
+        .order('created_at', { ascending: true })
+        .limit(50);
+
+      const jaConfirmouEndereco = (msgsEndereco || []).some((m: any) =>
+        (m.content || '').includes('Consta esse endereço no sistema') ||
+        (m.content || '').includes('Confirmando:')
+      );
+
+      etapaEnderecoOk = jaConfirmouEndereco;
+    }
+
+    // Processa agendamento confirmado (fluxo de agendamento apenas)
+    if (campanha.tipo_atendimento !== 'venda_material' && respostaIA.includes('###AGENDAMENTO_CONFIRMADO###')) {
+      if (!etapaEnderecoOk) {
+        // IA tentou confirmar agendamento sem etapa de endereco - bloquear
+        console.log(`[Processor] IA tentou confirmar agendamento sem etapa de endereço - bloqueado e redirecionado para contact_id: ${contactId}`);
+
+        // Busca endereco do contato na tabela contatos_campanha
+        const { data: contatoCampanha } = await sb
           .from('contatos_campanha')
-          .select('id, nome, numero_contrato, curso, local, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem')
+          .select('local, nome')
           .eq('campanha_id', campanha.id)
           .eq('telefone', telefone)
           .maybeSingle();
 
-        const dadosContato = contatoCampanhaData || {};
-        const nomeCompleto = dadosContato.nome || nome;
+        const endereco = contatoCampanha?.local || 'Não informado';
+        const nomeContato = contatoCampanha?.nome || nome;
+        const msgEndereco = `Perfeito, ${nomeContato}! Consta esse endereço no sistema: 📍 ${endereco}. Continua sendo esse? Para facilitar, pode me informar um ponto de referência também? 😊`;
 
-        // Busca ou cria contact_id (necessario para historico e agendamento)
-        const { data: contatoDb } = await sb
-          .from('contacts')
-          .select('id, assigned_to')
-          .eq('phone', telefone)
-          .maybeSingle();
+        // Descarta a resposta da IA e envia a mensagem de confirmacao de endereco
+        const sucessoEndereco = await enviarMensagemUazapi(telefone, msgEndereco);
+        await logarEnvio(sb, campanha.id, telefone, sucessoEndereco);
 
-        let contactId = contatoDb?.id;
-
-        // VERIFICACAO DE MODO MANUAL: se o contato esta em modo manual, salva a mensagem recebida mas nao chama a IA
-        if (contatoDb?.assigned_to === 'manual') {
-          console.log(`[Processor] Contato ${telefone} em modo manual - salvando mensagem sem acionar IA`);
-          await sb.from('messages').insert({
-            contact_id: contatoDb.id,
-            direction: 'in',
-            content: texto_resposta,
-            sent_by: 'contato',
-            seq: 0,
-          });
-          return new Response(JSON.stringify({ success: true, skipped: true, reason: 'manual_mode' }), {
-            status: 200,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
-        }
-
-        if (!contactId) {
-          const { data: novoContato } = await sb
-            .from('contacts')
-            .insert({ phone: telefone, name: nome, status: 'lead', assigned_to: 'ia' })
-            .select('id')
-            .single();
-          contactId = novoContato?.id;
-        }
-
-        // Salva mensagem recebida do formando
-        if (contactId) {
+        if (sucessoEndereco && contactId) {
           await sb.from('messages').insert({
             contact_id: contactId,
-            direction: 'in',
-            content: texto_resposta,
-            sent_by: 'contato',
+            direction: 'out',
+            content: msgEndereco,
+            sent_by: 'ia',
             seq: 0,
           });
         }
 
-        // Busca historico para dar contexto real a IA
-        let history: Array<{ role: string; parts: Array<{ text: string }> }> = [];
-        let textosFormando: string[] = [];
-        if (contactId) {
-          const { data: mensagens } = await sb
-            .from('messages')
-            .select('*')
-            .eq('contact_id', contactId)
-            .order('created_at', { ascending: true })
-            .limit(20);
+        // Mantem status em_conversa, sem avancar para agendado
+        await sb
+          .from('conversa_estado')
+          .update({
+            aguardando_resposta: true,
+            status: 'aguardando_lead',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', conversa.id);
 
-          textosFormando = (mensagens || []).filter((m: any) => m.direction === 'in').map((m: any) => (m.content || '').toLowerCase());
-
-          history = (mensagens || []).map((m: any) => ({
-            role: m.direction === 'in' ? 'user' : 'model',
-            parts: [{ text: m.content }],
-          }));
-
-          // Remove a mensagem que acabou de ser inserida (sera enviada separadamente ao chat)
-          if (history.length > 0 && history[history.length - 1].role === 'user') {
-            history.pop();
-          }
-
-          // Gemini exige que o historico comece com 'user'
-          while (history.length > 0 && history[0].role !== 'user') {
-            history.shift();
-          }
-        }
-
-        // Se ja existe agendamento, reforca isso no prompt para a IA nao repetir a pergunta
-        let contextoAgendamento = '';
-        if (contactId) {
-          const { data: agendamentoRecente } = await sb
-            .from('appointments')
-            .select('date, shift, location')
-            .eq('contact_id', contactId)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
-          if (agendamentoRecente) {
-            contextoAgendamento = `ATENCAO - ESTADO ATUAL: Este formando JA TEM uma visita confirmada para ${agendamentoRecente.date} no turno ${agendamentoRecente.shift}, endereco ${agendamentoRecente.location || 'Nao informado'}. NAO reinicie a apresentacao nem ofereca novas datas. Se ele pedir explicitamente para mudar, trate como reagendamento dentro das opcoes validas.`;
-          }
-        }
-
-        const respostaIA = await chamarGemini(
-          sb,
-          campanha.prompt_ia || '',
-          campanha.base_conhecimento || '',
-          texto_resposta,
-          nome,
-          campanha.opcoes_agendamento || [],
-          history,
-          contextoAgendamento,
-          campanha.tipo_atendimento || 'visita_externa',
-          dadosContato as DadosVenda
-        );
-
-        if (respostaIA) {
-          let novoStatus = 'em_conversa';
-
-          // TRAVA DE SEGURANCA: verificar se a etapa de confirmacao de endereco aconteceu
-          let etapaEnderecoOk = false;
-          if (contactId) {
-            const { data: msgsEndereco } = await sb
-              .from('messages')
-              .select('content')
-              .eq('contact_id', contactId)
-              .eq('direction', 'out')
-              .eq('sent_by', 'ia')
-              .order('created_at', { ascending: true })
-              .limit(50);
-
-            const jaConfirmouEndereco = (msgsEndereco || []).some((m: any) =>
-              (m.content || '').includes('Consta esse endereço no sistema') ||
-              (m.content || '').includes('Confirmando:')
-            );
-
-            etapaEnderecoOk = jaConfirmouEndereco;
-          }
-
-          // Processa agendamento confirmado (fluxo de agendamento apenas)
-          if (campanha.tipo_atendimento !== 'venda_material' && respostaIA.includes('###AGENDAMENTO_CONFIRMADO###')) {
-            if (!etapaEnderecoOk) {
-              // IA tentou confirmar agendamento sem etapa de endereco - bloquear
-              console.log(`[Processor] IA tentou confirmar agendamento sem etapa de endereço - bloqueado e redirecionado para contact_id: ${contactId}`);
-
-              // Busca endereco do contato na tabela contatos_campanha
-              const { data: contatoCampanha } = await sb
-                .from('contatos_campanha')
-                .select('local, nome')
-                .eq('campanha_id', campanha.id)
-                .eq('telefone', telefone)
-                .maybeSingle();
-
-              const endereco = contatoCampanha?.local || 'Não informado';
-              const nomeContato = contatoCampanha?.nome || nome;
-              const msgEndereco = `Perfeito, ${nomeContato}! Consta esse endereço no sistema: 📍 ${endereco}. Continua sendo esse? Para facilitar, pode me informar um ponto de referência também? 😊`;
-
-              // Descarta a resposta da IA e envia a mensagem de confirmacao de endereco
-              const sucessoEndereco = await enviarMensagemUazapi(telefone, msgEndereco);
-              await logarEnvio(sb, campanha.id, telefone, sucessoEndereco);
-
-              if (sucessoEndereco && contactId) {
-                await sb.from('messages').insert({
-                  contact_id: contactId,
-                  direction: 'out',
-                  content: msgEndereco,
-                  sent_by: 'ia',
-                  seq: 0,
-                });
-              }
-
-              // Mantem status em_conversa, sem avancar para agendado
-              await sb
-                .from('conversa_estado')
-                .update({
-                  aguardando_resposta: true,
-                  status: 'aguardando_lead',
-                  updated_at: new Date().toISOString(),
-                })
-                .eq('id', conversa.id);
-
-              await sb
-                .from('contatos_campanha')
-                .update({ status: 'em_conversa' })
-                .eq('campanha_id', campanha.id)
-                .eq('telefone', telefone);
-
-              return new Response(JSON.stringify({
-                success: true,
-                resposta_gerada: true,
-                bloqueado: true,
-                motivo: 'etapa_endereco_pendente',
-              }), {
-                status: 200,
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-              });
-            }
-
-            try {
-              const jsonMatch = respostaIA.match(/###AGENDAMENTO_CONFIRMADO###([\s\S]*?)###FIM###/);
-              if (jsonMatch && jsonMatch[1]) {
-                const dados = JSON.parse(jsonMatch[1].trim());
-                const dataValida = /^\d{4}-\d{2}-\d{2}$/.test(dados.data);
-                if (dataValida) {
-                  // VALIDACAO SERVER-SIDE: verifica se o formando realmente mencionou
-                  // a data e horario/turno em alguma mensagem anterior (direction='in')
-                  const horarioOuTurno = dados.turno || dados.horario || '';
-                  const dataValidada = validarDataHorarioMencionado(dados.data, horarioOuTurno, textosFormando, campanha?.opcoes_agendamento || []);
-
-                  if (!dataValidada) {
-                    console.error('[Processor] ALERTA: IA tentou confirmar agendamento sem validacao — data/horario nao encontrado nas mensagens do formando. contact_id:', contactId, 'dados:', dados);
-
-                    await sb
-                      .from('contatos_campanha')
-                      .update({ revisao_humana: true })
-                      .eq('campanha_id', campanha.id)
-                      .eq('telefone', telefone);
-
-                    if (contactId) {
-                      await sb.from('contacts').update({ revisao_humana: true }).eq('id', contactId);
-                    }
-
-                    console.log(`[Processor] Contato ${nome} marcado para revisao humana — possivel agendamento nao confirmado pelo cliente`);
-                  } else {
-
-                    const { error: appointmentError } = await sb.from('appointments').insert({
-                      graduand_name: nomeCompleto,
-                      contract_number: dadosContato.numero_contrato || 'Nao Informado',
-                      course: dadosContato.curso || 'Outros',
-                      date: dados.data,
-                      shift: dados.turno || dados.horario || '',
-                      location: dados.local || dadosContato.local || 'RESIDENCIA',
-                      status: 'Em negociacao',
-                      contact_id: contactId,
-                      campaign_contact_id: dadosContato.id,
-                      campaign_id: campanha.id,
-                      seller_name: 'INDEFINIDO',
-                    });
-                    if (appointmentError) {
-                      console.error('[Processor] ERRO ao inserir agendamento:', JSON.stringify(appointmentError));
-                    } else {
-                      console.log(`[Processor] Agendamento inserido para: ${nome}`);
-                      novoStatus = 'agendado';
-                    }
-                  }
-                } else {
-                  console.error('[Processor] Data invalida recebida da IA:', dados.data);
-                }
-              }
-            } catch (e) {
-              console.error('[Processor] Falha ao parsear agendamento:', e);
-            }
-          }
-
-          // Processa intencao de compra confirmada (fluxo de venda de material apenas)
-          if (campanha.tipo_atendimento === 'venda_material' && respostaIA.includes('###QUER_COMPRAR###')) {
-            let planoEscolhido = '';
-            let formaPagamentoEscolhida = '';
-            try {
-              const jsonMatch = respostaIA.match(/###QUER_COMPRAR###([\s\S]*?)###FIM###/);
-              if (jsonMatch && jsonMatch[1]) {
-                const dados = JSON.parse(jsonMatch[1].trim());
-                planoEscolhido = dados.plano_escolhido || '';
-                formaPagamentoEscolhida = dados.forma_pagamento_escolhida || '';
-              }
-            } catch (e) {
-              console.error('[Processor] Falha ao parsear QUER_COMPRAR:', e);
-            }
-
-            novoStatus = 'interessado_compra';
-
-            await notificarInteresseDeCompra(
-              sb,
-              dadosContato.id,
-              campanha.id,
-              nomeCompleto,
-              dadosContato as DadosVenda,
-              planoEscolhido,
-              formaPagamentoEscolhida
-            );
-
-            console.log(`[Processor] ${nomeCompleto} confirmou interesse de compra - Square notificado`);
-          }
-
-          if (respostaIA.includes('###SEM_INTERESSE###')) {
-            novoStatus = 'sem_interesse';
-          }
-
-          if (respostaIA.includes('###OVERFLOW###')) {
-            novoStatus = 'transferido_humano';
-            if (contactId) {
-              await sb.from('contacts').update({ assigned_to: 'manual' }).eq('id', contactId);
-            }
-          }
-
-          const respostaLimpa = respostaIA
-            .replace(/###AGENDAMENTO_CONFIRMADO###[\s\S]*?###FIM###/g, '')
-            .replace(/###QUER_COMPRAR###[\s\S]*?###FIM###/g, '')
-            .replace(/###OVERFLOW###/g, '')
-            .replace(/###SEM_INTERESSE###/g, '')
-            .trim();
-
-          const sucesso = await enviarMensagemUazapi(telefone, respostaLimpa);
-          await logarEnvio(sb, campanha.id, telefone, sucesso);
-
-          if (sucesso) {
-            if (contactId) {
-              await sb.from('messages').insert({
-                contact_id: contactId,
-                direction: 'out',
-                content: respostaLimpa,
-                sent_by: 'ia',
-                seq: 0,
-              });
-            }
-
-            await sb
-              .from('conversa_estado')
-              .update({
-                aguardando_resposta: false,
-                bloco_atual: conversa.bloco_atual + 1,
-                status: 'ativo',
-                updated_at: new Date().toISOString(),
-              })
-              .eq('id', conversa.id);
-
-            await sb
-              .from('contatos_campanha')
-              .update({ status: novoStatus })
-              .eq('campanha_id', campanha.id)
-              .eq('telefone', telefone);
-
-            await processarProximoBloco(sb, conversa.id);
-          }
-        }
+        await sb
+          .from('contatos_campanha')
+          .update({ status: 'em_conversa' })
+          .eq('campanha_id', campanha.id)
+          .eq('telefone', telefone);
 
         return new Response(JSON.stringify({
           success: true,
-          resposta_gerada: !!respostaIA,
+          resposta_gerada: true,
+          bloqueado: true,
+          motivo: 'etapa_endereco_pendente',
         }), {
           status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+
+      try {
+        const jsonMatch = respostaIA.match(/###AGENDAMENTO_CONFIRMADO###([\s\S]*?)###FIM###/);
+        if (jsonMatch && jsonMatch[1]) {
+          const dados = JSON.parse(jsonMatch[1].trim());
+          const dataValida = /^\d{4}-\d{2}-\d{2}$/.test(dados.data);
+          if (dataValida) {
+            // VALIDACAO SERVER-SIDE: verifica se o formando realmente mencionou
+            // a data e horario/turno em alguma mensagem anterior (direction='in')
+            const horarioOuTurno = dados.turno || dados.horario || '';
+            const dataValidada = validarDataHorarioMencionado(dados.data, horarioOuTurno, textosFormando, campanha?.opcoes_agendamento || []);
+
+            if (!dataValidada) {
+              console.error('[Processor] ALERTA: IA tentou confirmar agendamento sem validacao — data/horario nao encontrado nas mensagens do formando. contact_id:', contactId, 'dados:', dados);
+
+              await sb
+                .from('contatos_campanha')
+                .update({ revisao_humana: true })
+                .eq('campanha_id', campanha.id)
+                .eq('telefone', telefone);
+
+              if (contactId) {
+                await sb.from('contacts').update({ revisao_humana: true }).eq('id', contactId);
+              }
+
+              console.log(`[Processor] Contato ${nome} marcado para revisao humana — possivel agendamento nao confirmado pelo cliente`);
+            } else {
+
+            const { error: appointmentError } = await sb.from('appointments').insert({
+              graduand_name: nomeCompleto,
+              contract_number: dadosContato.numero_contrato || 'Nao Informado',
+              course: dadosContato.curso || 'Outros',
+              date: dados.data,
+              shift: dados.turno || dados.horario || '',
+              location: dados.local || dadosContato.local || 'RESIDENCIA',
+              status: 'Em negociacao',
+              contact_id: contactId,
+              campaign_contact_id: dadosContato.id,
+              campaign_id: campanha.id,
+              seller_name: 'INDEFINIDO',
+            });
+            if (appointmentError) {
+              console.error('[Processor] ERRO ao inserir agendamento:', JSON.stringify(appointmentError));
+            } else {
+              console.log(`[Processor] Agendamento inserido para: ${nome}`);
+              novoStatus = 'agendado';
+            }
+            }
+          } else {
+            console.error('[Processor] Data invalida recebida da IA:', dados.data);
+          }
+        }
+      } catch (e) {
+        console.error('[Processor] Falha ao parsear agendamento:', e);
+      }
+    }
+
+    // Processa intencao de compra confirmada (fluxo de venda de material apenas)
+    if (campanha.tipo_atendimento === 'venda_material' && respostaIA.includes('###QUER_COMPRAR###')) {
+      let planoEscolhido = '';
+      let formaPagamentoEscolhida = '';
+      try {
+        const jsonMatch = respostaIA.match(/###QUER_COMPRAR###([\s\S]*?)###FIM###/);
+        if (jsonMatch && jsonMatch[1]) {
+          const dados = JSON.parse(jsonMatch[1].trim());
+          planoEscolhido = dados.plano_escolhido || '';
+          formaPagamentoEscolhida = dados.forma_pagamento_escolhida || '';
+        }
+      } catch (e) {
+        console.error('[Processor] Falha ao parsear QUER_COMPRAR:', e);
+      }
+
+      novoStatus = 'interessado_compra';
+
+      await sb
+        .from('contatos_campanha')
+        .update({
+          plano_escolhido: planoEscolhido || null,
+          forma_pagamento_escolhida: formaPagamentoEscolhida || null,
+        })
+        .eq('id', dadosContato.id);
+
+      await notificarInteresseDeCompra(
+        sb,
+        dadosContato.id,
+        campanha.id,
+        nomeCompleto,
+        dadosContato as DadosVenda,
+        planoEscolhido,
+        formaPagamentoEscolhida
+      );
+
+      console.log(`[Processor] ${nomeCompleto} confirmou interesse de compra - Square notificado`);
+    }
+
+    if (respostaIA.includes('###SEM_INTERESSE###')) {
+      novoStatus = 'sem_interesse';
+    }
+
+    if (respostaIA.includes('###OVERFLOW###')) {
+      novoStatus = 'transferido_humano';
+      if (contactId) {
+        await sb.from('contacts').update({ assigned_to: 'manual' }).eq('id', contactId);
+      }
+    }
+
+    const respostaLimpa = respostaIA
+      .replace(/###AGENDAMENTO_CONFIRMADO###[\s\S]*?###FIM###/g, '')
+      .replace(/###QUER_COMPRAR###[\s\S]*?###FIM###/g, '')
+      .replace(/###OVERFLOW###/g, '')
+      .replace(/###SEM_INTERESSE###/g, '')
+      .trim();
+
+    const sucesso = await enviarMensagemUazapi(telefone, respostaLimpa);
+    await logarEnvio(sb, campanha.id, telefone, sucesso);
+
+    if (sucesso) {
+      if (contactId) {
+        await sb.from('messages').insert({
+          contact_id: contactId,
+          direction: 'out',
+          content: respostaLimpa,
+          sent_by: 'ia',
+          seq: 0,
+        });
+      }
+
+      await sb
+        .from('conversa_estado')
+        .update({
+          aguardando_resposta: false,
+          bloco_atual: conversa.bloco_atual + 1,
+          status: 'ativo',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', conversa.id);
+
+      await sb
+        .from('contatos_campanha')
+        .update({ status: novoStatus })
+        .eq('campanha_id', campanha.id)
+        .eq('telefone', telefone);
+
+      await processarProximoBloco(sb, conversa.id);
+    }
+  }
+
+  return new Response(JSON.stringify({
+    success: true,
+    resposta_gerada: !!respostaIA,
+  }), {
+    status: 200,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
 
       default:
         return new Response(JSON.stringify({ error: 'Acao desconhecida' }), {

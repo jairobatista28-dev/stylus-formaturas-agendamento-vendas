@@ -255,8 +255,20 @@ export function Campaigns() {
       // Formata opcoes de agendamento para substituicao do placeholder {datas_disponiveis}
       const textoDatasFormatado = formatarDatasDisponiveis(campanha.opcoes_agendamento || [], campanha.tipo_atendimento || 'visita_externa');
 
-      for (const contato of contatosComUUID) {
-        let mensagemPersonalizada = campanha.mensagem_inicial
+      // Suporte a multiplas variantes de mensagem inicial: se o texto tiver
+      // "===VARIANTE===" separando blocos, cada contato recebe uma variante
+      // diferente em rodizio (nao aleatorio, pra garantir distribuicao
+      // equilibrada) - reduz o padrao repetitivo de texto pro WhatsApp.
+      const variantesMensagem = campanha.mensagem_inicial
+        .split(/===VARIANTE===/gi)
+        .map((v: string) => v.trim())
+        .filter((v: string) => v.length > 0);
+
+      for (let idx = 0; idx < contatosComUUID.length; idx++) {
+        const contato = contatosComUUID[idx];
+        const templateEscolhido = variantesMensagem[idx % variantesMensagem.length];
+
+        let mensagemPersonalizada = templateEscolhido
           .replace(/\{\{nome\}\}/gi, contato.nome)
           .replace(/{nome}/gi, contato.nome)
           .replace(/\{datas_disponiveis\}/gi, textoDatasFormatado);
