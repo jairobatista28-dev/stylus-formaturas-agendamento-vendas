@@ -18,6 +18,7 @@ export interface ContatoCampanha {
   formas_pagamento?: string;
   opcoes_plano?: string;
   prazo_reciclagem?: string;
+  quantidade_fotos?: string;
 }
 
 export interface Campanha {
@@ -105,6 +106,7 @@ export async function createCampanha(
     formas_pagamento?: string;
     opcoes_plano?: string;
     prazo_reciclagem?: string;
+    quantidade_fotos?: string;
   }>
 ): Promise<{ success: boolean; campanhaId?: string; source: 'supabase' | 'local'; error?: string }> {
   const now = new Date().toISOString();
@@ -149,12 +151,13 @@ export async function createCampanha(
         formas_pagamento: c.formas_pagamento || null,
         opcoes_plano: c.opcoes_plano || null,
         prazo_reciclagem: c.prazo_reciclagem || null,
+        quantidade_fotos: c.quantidade_fotos || null,
       }));
 
       const { data: contatosInseridos, error: contatosError } = await supabase
         .from('contatos_campanha')
         .insert(contatosParaInserir)
-        .select('id, nome, telefone, status, local, curso, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem');
+        .select('id, nome, telefone, status, local, curso, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos');
 
       if (contatosError) {
         console.warn('[Storage] Error saving contacts to Supabase:', contatosError);
@@ -183,6 +186,7 @@ export async function createCampanha(
           formas_pagamento: c.formas_pagamento,
           opcoes_plano: c.opcoes_plano,
           prazo_reciclagem: c.prazo_reciclagem,
+          quantidade_fotos: c.quantidade_fotos,
         })),
       });
       saveLocalCampanhas(localCampanhas);
@@ -222,6 +226,7 @@ export async function createCampanha(
       formas_pagamento: c.formas_pagamento,
       opcoes_plano: c.opcoes_plano,
       prazo_reciclagem: c.prazo_reciclagem,
+      quantidade_fotos: c.quantidade_fotos,
     }));
 
     const newCampanha: Campanha = {

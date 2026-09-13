@@ -156,6 +156,7 @@ async function chamarGemini(
     formas_pagamento?: string | null;
     opcoes_plano?: string | null;
     prazo_reciclagem?: string | null;
+    quantidade_fotos?: string | null;
   },
   history: Array<{ role: string; parts: Array<{ text: string }> }> = [],
   baseConhecimento: Array<{ pergunta: string; resposta: string }> = [],
@@ -191,6 +192,7 @@ async function chamarGemini(
     systemPrompt = systemPrompt.replace(/\{formas_pagamento\}/gi, contatoData.formas_pagamento || 'consulte as opcoes disponiveis');
     systemPrompt = systemPrompt.replace(/\{opcoes_plano\}/gi, contatoData.opcoes_plano || 'consulte as opcoes disponiveis');
     systemPrompt = systemPrompt.replace(/\{prazo_reciclagem\}/gi, contatoData.prazo_reciclagem || 'em breve');
+    systemPrompt = systemPrompt.replace(/\{quantidade_fotos\}/gi, contatoData.quantidade_fotos || 'nao informado');
 
     // Substitui placeholder {opcoes_agendamento} pelas opcoes reais
     const textoOpcoesFormatado = formatarOpcoesAgendamento(opcoesAgendamento);
@@ -738,6 +740,7 @@ async function executarFluxoCampanha(
     formas_pagamento: contatoCampanha.formas_pagamento,
     opcoes_plano: contatoCampanha.opcoes_plano,
     prazo_reciclagem: contatoCampanha.prazo_reciclagem,
+    quantidade_fotos: contatoCampanha.quantidade_fotos,
   };
 
   // Busca base de conhecimento global

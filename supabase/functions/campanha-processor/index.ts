@@ -81,6 +81,7 @@ interface DadosVenda {
   formas_pagamento?: string | null;
   opcoes_plano?: string | null;
   prazo_reciclagem?: string | null;
+  quantidade_fotos?: string | null;
 }
 
 /**
@@ -142,6 +143,7 @@ function substituirVariaveis(
     resultado = resultado.replace(/\{formas_pagamento\}/gi, dadosVenda?.formas_pagamento || 'consulte as opcoes disponiveis');
     resultado = resultado.replace(/\{opcoes_plano\}/gi, dadosVenda?.opcoes_plano || 'consulte as opcoes disponiveis');
     resultado = resultado.replace(/\{prazo_reciclagem\}/gi, dadosVenda?.prazo_reciclagem || 'em breve');
+    resultado = resultado.replace(/\{quantidade_fotos\}/gi, dadosVenda?.quantidade_fotos || 'nao informado');
   }
 
   return resultado;
@@ -572,6 +574,7 @@ Valor promocional oferecido: ${valorOuPadrao(dadosVenda?.valor_oferecido)}
 Formas de pagamento disponiveis: ${dadosVenda?.formas_pagamento || 'consulte as opcoes disponiveis'}
 Opcoes de plano/parcelamento: ${dadosVenda?.opcoes_plano || 'consulte as opcoes disponiveis'}
 Prazo de reciclagem/perda do material: ${dadosVenda?.prazo_reciclagem || 'em breve'}
+Quantidade de fotos/videos disponiveis: ${dadosVenda?.quantidade_fotos || 'nao informado'}
 
 Observacao importante: os campos de valor acima podem conter mais de uma opcao no mesmo
 texto (ex: "800,00 a vista ou no cartao em 6 parcelas de 200,00"). Quando isso acontecer,
@@ -723,7 +726,7 @@ async function processarProximoBloco(sb: any, conversaId: string): Promise<void>
   if (campanha.tipo_atendimento === 'venda_material') {
     const { data: contatoVenda } = await sb
       .from('contatos_campanha')
-      .select('numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem')
+      .select('numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos')
       .eq('campanha_id', campanha.id)
       .eq('telefone', telefone)
       .maybeSingle();
@@ -1004,7 +1007,7 @@ case 'resposta_recebida': {
   // Busca dados completos do contato na campanha (nome, contrato, curso, endereco)
   const { data: contatoCampanhaData } = await sb
     .from('contatos_campanha')
-    .select('id, nome, numero_contrato, status, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem')
+    .select('id, nome, numero_contrato, status, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos')
     .eq('campanha_id', campanha.id)
     .eq('telefone', telefone)
     .maybeSingle();

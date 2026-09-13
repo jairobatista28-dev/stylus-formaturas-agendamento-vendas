@@ -280,7 +280,8 @@ export function Campaigns() {
             .replace(/\{valor_oferecido\}/gi, contato.valor_oferecido != null ? String(contato.valor_oferecido) : 'valor sob consulta')
             .replace(/\{formas_pagamento\}/gi, contato.formas_pagamento || 'consulte as opcoes disponiveis')
             .replace(/\{opcoes_plano\}/gi, contato.opcoes_plano || 'consulte as opcoes disponiveis')
-            .replace(/\{prazo_reciclagem\}/gi, contato.prazo_reciclagem || 'em breve');
+            .replace(/\{prazo_reciclagem\}/gi, contato.prazo_reciclagem || 'em breve')
+            .replace(/\{quantidade_fotos\}/gi, (contato as any).quantidade_fotos || 'nao informado');
         }
 
         const blocos = parseMensagemCampanha(mensagemPersonalizada, contato.nome);
@@ -441,6 +442,7 @@ export function Campaigns() {
     const formasPagamentoIdx = headers.findIndex((h) => h.includes('formas_pagamento') || h.includes('formas de pagamento') || h.includes('pagamento'));
     const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
     const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem'));
+    const quantidadeFotosIdx = headers.findIndex((h) => h.includes('quantidade_fotos') || h.includes('quantidade de fotos') || h.includes('qtd_fotos') || h.includes('qtd fotos') || h.includes('numero de fotos'));
 
     if (nomeIdx === -1 || telefoneIdx === -1) {
       const foundHeaders = rawHeaders.join(', ');
@@ -450,7 +452,7 @@ export function Campaigns() {
       throw new Error(`Colunas obrigatorias nao encontradas: ${missing.join(', ')}\n\nCabecalhos encontrados: ${foundHeaders}`);
     }
 
-    const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string }> = [];
+    const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string; quantidade_fotos?: string }> = [];
 
     for (let i = 1; i < lines.length; i++) {
       try {
@@ -475,6 +477,7 @@ export function Campaigns() {
           formas_pagamento: formasPagamentoIdx !== -1 ? (values[formasPagamentoIdx] || undefined) : undefined,
           opcoes_plano: opcoesPlanoIdx !== -1 ? (values[opcoesPlanoIdx] || undefined) : undefined,
           prazo_reciclagem: prazoReciclagemIdx !== -1 ? (values[prazoReciclagemIdx] || undefined) : undefined,
+          quantidade_fotos: quantidadeFotosIdx !== -1 ? (values[quantidadeFotosIdx] || undefined) : undefined,
         });
       } catch (lineErr) {
         console.warn(`Error parsing line ${i + 1}:`, lineErr);
@@ -524,6 +527,7 @@ export function Campaigns() {
       const formasPagamentoIdx = headers.findIndex((h) => h.includes('formas_pagamento') || h.includes('formas de pagamento') || h.includes('pagamento'));
       const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
       const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem'));
+      const quantidadeFotosIdx = headers.findIndex((h) => h.includes('quantidade_fotos') || h.includes('quantidade de fotos') || h.includes('qtd_fotos') || h.includes('qtd fotos') || h.includes('numero de fotos'));
 
       if (nomeIdx === -1 || telefoneIdx === -1) {
         const foundHeaders = rawHeaders.join(', ');
@@ -533,7 +537,7 @@ export function Campaigns() {
         throw new Error(`Colunas obrigatorias nao encontradas: ${missing.join(', ')}.\n\nCabecalhos encontrados: ${foundHeaders}`);
       }
 
-      const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string }> = [];
+      const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string; quantidade_fotos?: string }> = [];
 
       for (let i = 1; i < jsonData.length; i++) {
         const values = jsonData[i] || [];
@@ -557,6 +561,7 @@ export function Campaigns() {
           formas_pagamento: formasPagamentoIdx !== -1 ? String(values[formasPagamentoIdx] || '') || undefined : undefined,
           opcoes_plano: opcoesPlanoIdx !== -1 ? String(values[opcoesPlanoIdx] || '') || undefined : undefined,
           prazo_reciclagem: prazoReciclagemIdx !== -1 ? String(values[prazoReciclagemIdx] || '') || undefined : undefined,
+          quantidade_fotos: quantidadeFotosIdx !== -1 ? String(values[quantidadeFotosIdx] || '') || undefined : undefined,
         });
       }
 
@@ -911,14 +916,15 @@ export function Campaigns() {
                       Nesse tipo de campanha, o valor e as condicoes de cada formando vem da propria
                       planilha (nao ha datas/horarios). Inclua na planilha, alem de nome e telefone,
                       as colunas: <strong>valor_tabela</strong>, <strong>valor_oferecido</strong>,{' '}
-                      <strong>formas_pagamento</strong>, <strong>opcoes_plano</strong> e{' '}
+                      <strong>formas_pagamento</strong>, <strong>opcoes_plano</strong>,{' '}
                       <strong>prazo_reciclagem</strong> (esta ultima pode ser o mesmo texto pra todos,
-                      ex: "31/10/2026").
+                      ex: "31/10/2026") e <strong>quantidade_fotos</strong> (quantidade de fotos/videos
+                      que o formando tem disponivel, pra IA responder se ele perguntar).
                     </p>
                     <p className="text-xs mt-1" style={{ color: 'var(--info)' }}>
                       Dica: use {`{valor_tabela}`}, {`{valor_oferecido}`}, {`{formas_pagamento}`},{' '}
-                      {`{opcoes_plano}`} e {`{prazo_reciclagem}`} na mensagem inicial e no prompt da IA
-                      para personalizar por contrato.
+                      {`{opcoes_plano}`}, {`{prazo_reciclagem}`} e {`{quantidade_fotos}`} na mensagem
+                      inicial e no prompt da IA para personalizar por contrato.
                     </p>
                   </div>
                 )}
