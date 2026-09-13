@@ -198,6 +198,14 @@ async function chamarGemini(
     const textoOpcoesFormatado = formatarOpcoesAgendamento(opcoesAgendamento);
     systemPrompt = systemPrompt.replace(/\{opcoes_agendamento\}/gi, textoOpcoesFormatado);
 
+    // Blindagem: nunca deixe a IA copiar um marcador de exemplo (tipo
+    // "[Nome do Formando]") como se fosse texto literal a ser enviado
+    systemPrompt +=
+      `\n\nCRITICO: use sempre o nome real do contato (${contatoData.nome}) nas suas respostas. ` +
+      'NUNCA escreva marcadores/placeholders como [Nome do Formando], [nome], {nome} ou qualquer ' +
+      'texto entre colchetes/chaves no lugar do nome - se algum trecho de instrucao acima citar um ' +
+      'exemplo assim, e apenas ilustrativo, nunca copie esse formato literal na sua resposta.';
+
     // Substitui placeholder {Nome} nas respostas da base de conhecimento
     const baseConhecimentoFormatada = baseConhecimento.map((item) => ({
       pergunta: item.pergunta,
