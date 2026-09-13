@@ -305,6 +305,27 @@ const NUMERO_VENDEDOR_MATERIAL_LEGADO = '5592993809136';
  * interesse em comprar, e registra em notificacoes_venda. Usado apenas
  * no fluxo legado (contatos sem conversa_estado ainda).
  */
+
+/**
+ * Divide o texto de valor/opcoes (que pode conter mais de uma opcao, ex:
+ * "800,00 a vista ou no cartao em 6x de 200,00") em uma lista numerada de
+ * planos, pra exibir de forma clara na notificacao ao vendedor.
+ */
+function formatarPlanosDisponiveisLegado(texto?: string | null): string {
+  if (!texto || String(texto).trim() === '') return 'Nao especificado';
+
+  const partes = String(texto)
+    .split(/\r?\n|;|\s+ou\s+/gi)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+
+  if (partes.length <= 1) return `▫️ ${String(texto).trim()}`;
+
+  return partes
+    .map((p, i) => `▫️ Plano ${String(i + 1).padStart(2, '0')}: ${p}`)
+    .join('\n');
+}
+
 async function notificarInteresseDeCompraLegado(
   sb: any,
   contatoCampanhaId: string | undefined,
@@ -314,13 +335,13 @@ async function notificarInteresseDeCompraLegado(
   planoEscolhido: string,
   formaPagamentoEscolhida: string
 ): Promise<void> {
-  const mensagem = `🔔 Novo interessado em comprar material fotografico!\n` +
-    `Nome: ${nomeContato}\n` +
-    `Contrato: ${contatoCampanha?.numero_contrato || 'Nao informado'}\n` +
-    `Valor: ${contatoCampanha?.valor_oferecido ?? 'valor sob consulta'}\n` +
-    `Plano: ${planoEscolhido || contatoCampanha?.opcoes_plano || 'Nao especificado'}\n` +
-    `Pagamento: ${formaPagamentoEscolhida || contatoCampanha?.formas_pagamento || 'Nao especificado'}\n` +
-    `\nAcesse o sistema para enviar o link de pagamento.`;
+  const mensagem = `🎉 *Novo interessado em comprar material fotografico!*\n\n` +
+    `👤 *Nome:* ${nomeContato}\n` +
+    `📄 *Contrato:* ${contatoCampanha?.numero_contrato || 'Nao informado'}\n\n` +
+    `💰 *Planos disponiveis:*\n${formatarPlanosDisponiveisLegado(contatoCampanha?.valor_oferecido ?? contatoCampanha?.opcoes_plano)}\n\n` +
+    `✅ *Plano escolhido:* ${planoEscolhido || contatoCampanha?.opcoes_plano || 'Nao especificado'}\n` +
+    `💳 *Pagamento:* ${formaPagamentoEscolhida || contatoCampanha?.formas_pagamento || 'Nao especificado'}\n\n` +
+    `👉 Acesse o sistema para enviar o link de pagamento.`;
 
   await enviarMensagemUazapi(NUMERO_VENDEDOR_MATERIAL_LEGADO, mensagem);
 

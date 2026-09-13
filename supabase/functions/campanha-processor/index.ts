@@ -160,6 +160,28 @@ function valorOuPadrao(valor?: string | null): string {
 }
 
 /**
+ * Divide o texto de valor/opcoes (que pode conter mais de uma opcao, ex:
+ * "800,00 a vista ou no cartao em 6x de 200,00") em uma lista numerada de
+ * planos, pra exibir de forma clara na notificacao ao vendedor, sem repetir
+ * o mesmo texto em "valor" e "plano". Aceita quebra de linha, ";" ou a
+ * palavra "ou" como separador entre opcoes.
+ */
+function formatarPlanosDisponiveis(texto?: string | null): string {
+  if (!texto || texto.trim() === '') return 'Nao especificado';
+
+  const partes = texto
+    .split(/\r?\n|;|\s+ou\s+/gi)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+
+  if (partes.length <= 1) return `▫️ ${texto.trim()}`;
+
+  return partes
+    .map((p, i) => `▫️ Plano ${String(i + 1).padStart(2, '0')}: ${p}`)
+    .join('\n');
+}
+
+/**
  * Calcula jitter aleatorio (base +/- 40%)
  */
 function calcularJitter(segundosBase: number): number {
@@ -250,13 +272,13 @@ async function notificarInteresseDeCompra(
   planoEscolhido: string,
   formaPagamentoEscolhida: string
 ): Promise<void> {
-  const mensagem = `🔔 Novo interessado em comprar material fotografico!\n` +
-    `Nome: ${nomeContato}\n` +
-    `Contrato: ${dadosVenda?.numero_contrato || 'Nao informado'}\n` +
-    `Valor: ${valorOuPadrao(dadosVenda?.valor_oferecido)}\n` +
-    `Plano: ${planoEscolhido || dadosVenda?.opcoes_plano || 'Nao especificado'}\n` +
-    `Pagamento: ${formaPagamentoEscolhida || dadosVenda?.formas_pagamento || 'Nao especificado'}\n` +
-    `\nAcesse o sistema para enviar o link de pagamento.`;
+  const mensagem = `🎉 *Novo interessado em comprar material fotografico!*\n\n` +
+    `👤 *Nome:* ${nomeContato}\n` +
+    `📄 *Contrato:* ${dadosVenda?.numero_contrato || 'Nao informado'}\n\n` +
+    `💰 *Planos disponiveis:*\n${formatarPlanosDisponiveis(dadosVenda?.valor_oferecido || dadosVenda?.opcoes_plano)}\n\n` +
+    `✅ *Plano escolhido:* ${planoEscolhido || dadosVenda?.opcoes_plano || 'Nao especificado'}\n` +
+    `💳 *Pagamento:* ${formaPagamentoEscolhida || dadosVenda?.formas_pagamento || 'Nao especificado'}\n\n` +
+    `👉 Acesse o sistema para enviar o link de pagamento.`;
 
   await enviarMensagemUazapi(NUMERO_VENDEDOR_MATERIAL, mensagem);
 
