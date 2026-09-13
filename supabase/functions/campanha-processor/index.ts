@@ -530,7 +530,12 @@ async function chamarGemini(
     let systemInstruction = '';
 
     if (promptIa) {
-      systemInstruction += promptIa;
+      // Substitui os placeholders ({nome}, {numero_contrato}, {valor_oferecido} etc.)
+      // que o proprio usuario escreveu no prompt personalizado da campanha.
+      // Sem isso, esses trechos chegavam literais (com chaves) pro Gemini,
+      // que por vezes tentava "preencher a lacuna" sozinho e escrevia algo
+      // como "[Nome do Formando]" na resposta em vez do nome real.
+      systemInstruction += substituirVariaveis(promptIa, nomeContato, opcoesAgendamento, tipoAtendimento, dadosVenda);
     }
 
     if (baseGlobal) {
