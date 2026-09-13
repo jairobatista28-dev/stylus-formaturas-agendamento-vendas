@@ -76,8 +76,8 @@ const NUMERO_VENDEDOR_MATERIAL = '5592993809136';
 // campanha.tipo_atendimento === 'venda_material'
 interface DadosVenda {
   numero_contrato?: string;
-  valor_tabela?: number | string | null;
-  valor_oferecido?: number | string | null;
+  valor_tabela?: string | null;
+  valor_oferecido?: string | null;
   formas_pagamento?: string | null;
   opcoes_plano?: string | null;
   prazo_reciclagem?: string | null;
@@ -137,8 +137,8 @@ function substituirVariaveis(
   // Variaveis exclusivas do fluxo de venda de material fotografico
   if (tipoAtendimento === 'venda_material') {
     resultado = resultado.replace(/\{numero_contrato\}/gi, dadosVenda?.numero_contrato || 'Nao informado');
-    resultado = resultado.replace(/\{valor_tabela\}/gi, formatarValorReais(dadosVenda?.valor_tabela));
-    resultado = resultado.replace(/\{valor_oferecido\}/gi, formatarValorReais(dadosVenda?.valor_oferecido));
+    resultado = resultado.replace(/\{valor_tabela\}/gi, valorOuPadrao(dadosVenda?.valor_tabela));
+    resultado = resultado.replace(/\{valor_oferecido\}/gi, valorOuPadrao(dadosVenda?.valor_oferecido));
     resultado = resultado.replace(/\{formas_pagamento\}/gi, dadosVenda?.formas_pagamento || 'consulte as opcoes disponiveis');
     resultado = resultado.replace(/\{opcoes_plano\}/gi, dadosVenda?.opcoes_plano || 'consulte as opcoes disponiveis');
     resultado = resultado.replace(/\{prazo_reciclagem\}/gi, dadosVenda?.prazo_reciclagem || 'em breve');
@@ -148,13 +148,15 @@ function substituirVariaveis(
 }
 
 /**
- * Formata um valor numerico (ou string) como Reais para uso nas mensagens
+ * Retorna o texto de valor (ja formatado pelo usuario na planilha, podendo
+ * conter mais de uma opcao, ex: "800,00 a vista ou no cartao em 6x de
+ * 200,00") ou um texto padrao quando o campo estiver vazio. Nao tenta
+ * converter/parsear como numero: o campo e texto livre para suportar
+ * multiplas opcoes de valor/forma de pagamento sem quebrar.
  */
-function formatarValorReais(valor?: number | string | null): string {
-  if (valor === null || valor === undefined || valor === '') return 'valor sob consulta';
-  const numero = typeof valor === 'string' ? parseFloat(valor.replace(',', '.')) : valor;
-  if (Number.isNaN(numero)) return 'valor sob consulta';
-  return numero.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+function valorOuPadrao(valor?: string | null): string {
+  if (valor === null || valor === undefined || valor.trim() === '') return 'valor sob consulta';
+  return valor;
 }
 
 /**
@@ -251,7 +253,7 @@ async function notificarInteresseDeCompra(
   const mensagem = `🔔 Novo interessado em comprar material fotografico!\n` +
     `Nome: ${nomeContato}\n` +
     `Contrato: ${dadosVenda?.numero_contrato || 'Nao informado'}\n` +
-    `Valor: ${formatarValorReais(dadosVenda?.valor_oferecido)}\n` +
+    `Valor: ${valorOuPadrao(dadosVenda?.valor_oferecido)}\n` +
     `Plano: ${planoEscolhido || dadosVenda?.opcoes_plano || 'Nao especificado'}\n` +
     `Pagamento: ${formaPagamentoEscolhida || dadosVenda?.formas_pagamento || 'Nao especificado'}\n` +
     `\nAcesse o sistema para enviar o link de pagamento.`;
@@ -492,11 +494,17 @@ urgencia como um fato real da situacao dele(a), nunca como um gatilho de pressao
 ## DADOS DESTE CONTRATO (use exatamente estes valores, nunca invente outros)
 Nome: ${nomeContato}
 Numero do contrato: ${dadosVenda?.numero_contrato || 'Nao informado'}
-Valor de tabela (cheio): ${formatarValorReais(dadosVenda?.valor_tabela)}
-Valor promocional oferecido: ${formatarValorReais(dadosVenda?.valor_oferecido)}
+Valor de tabela (cheio): ${valorOuPadrao(dadosVenda?.valor_tabela)}
+Valor promocional oferecido: ${valorOuPadrao(dadosVenda?.valor_oferecido)}
 Formas de pagamento disponiveis: ${dadosVenda?.formas_pagamento || 'consulte as opcoes disponiveis'}
 Opcoes de plano/parcelamento: ${dadosVenda?.opcoes_plano || 'consulte as opcoes disponiveis'}
 Prazo de reciclagem/perda do material: ${dadosVenda?.prazo_reciclagem || 'em breve'}
+
+Observacao importante: os campos de valor acima podem conter mais de uma opcao no mesmo
+texto (ex: "800,00 a vista ou no cartao em 6 parcelas de 200,00"). Quando isso acontecer,
+apresente cada opcao de forma separada e clara pro formando (ex: "a vista sai por R$ 800,00,
+ou se preferir, dividido no cartao fica em 6x de R$ 200,00"), nunca leia o texto cru como se
+fosse um unico numero.
 
 ## REGRAS DE TOM
 - Fale como uma pessoa real, proxima e calorosa. Frases curtas, nunca parecendo script.

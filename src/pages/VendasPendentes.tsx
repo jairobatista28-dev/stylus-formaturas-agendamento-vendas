@@ -9,8 +9,8 @@ interface VendaPendente {
   nome: string;
   telefone: string;
   numero_contrato: string | null;
-  valor_tabela: number | null;
-  valor_oferecido: number | null;
+  valor_tabela: string | null;
+  valor_oferecido: string | null;
   plano_escolhido: string | null;
   forma_pagamento_escolhida: string | null;
   formas_pagamento: string | null;
@@ -21,9 +21,9 @@ interface VendaPendente {
   campanha_id: string;
 }
 
-function formatarValor(valor: number | null): string {
-  if (valor == null) return 'Valor sob consulta';
-  return valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+function formatarValor(valor: string | null): string {
+  if (valor == null || valor.trim() === '') return 'Valor sob consulta';
+  return valor;
 }
 
 export function VendasPendentes() {

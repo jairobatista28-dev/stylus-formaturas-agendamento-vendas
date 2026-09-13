@@ -13,8 +13,8 @@ export interface ContatoCampanha {
   curso?: string;
   numero_contrato?: string;
   data?: string;
-  valor_tabela?: string | number;
-  valor_oferecido?: string | number;
+  valor_tabela?: string;
+  valor_oferecido?: string;
   formas_pagamento?: string;
   opcoes_plano?: string;
   prazo_reciclagem?: string;
@@ -93,7 +93,19 @@ export async function fetchCampanhas(): Promise<{ data: Campanha[]; source: 'sup
 
 export async function createCampanha(
   campanha: Omit<Campanha, 'id' | 'criado_em' | 'status' | 'contatos'>,
-  contatos: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string }>
+  contatos: Array<{
+    nome: string;
+    telefone: string;
+    local?: string;
+    curso?: string;
+    numero_contrato?: string;
+    data?: string;
+    valor_tabela?: string;
+    valor_oferecido?: string;
+    formas_pagamento?: string;
+    opcoes_plano?: string;
+    prazo_reciclagem?: string;
+  }>
 ): Promise<{ success: boolean; campanhaId?: string; source: 'supabase' | 'local'; error?: string }> {
   const now = new Date().toISOString();
 
