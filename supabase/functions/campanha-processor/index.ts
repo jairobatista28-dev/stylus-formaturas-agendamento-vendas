@@ -260,6 +260,52 @@ async function enviarMensagemUazapi(telefone: string, texto: string): Promise<bo
 }
 
 /**
+ * Envia midia (imagem, documento, audio, video) via Uazapi (POST /send/media).
+ * `file` aceita URL publica ou base64.
+ */
+async function enviarMidiaUazapi(
+  telefone: string,
+  file: string,
+  tipo: 'image' | 'video' | 'document' | 'audio' | 'ptt' = 'image',
+  legenda?: string,
+  docName?: string
+): Promise<boolean> {
+  const uazapiUrl = Deno.env.get('UAZAPI_BASE_URL');
+  const uazapiToken = Deno.env.get('UAZAPI_TOKEN');
+
+  if (!uazapiUrl || !uazapiToken || !file) return false;
+
+  try {
+    const res = await fetch(`${uazapiUrl}/send/media`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'token': uazapiToken,
+      },
+      body: JSON.stringify({
+        number: telefone,
+        type: tipo,
+        file,
+        ...(legenda ? { text: legenda } : {}),
+        ...(docName ? { docName } : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`[Uazapi] Erro ao enviar midia ${res.status}:`, err);
+      return false;
+    }
+
+    console.log(`[Uazapi] Midia enviada para ${telefone}`);
+    return true;
+  } catch (err) {
+    console.error('[Uazapi] Erro ao enviar midia:', err);
+    return false;
+  }
+}
+
+/**
  * Notifica o vendedor (Square) no WhatsApp quando um formando confirma
  * interesse em comprar o material fotografico, e registra em notificacoes_venda.
  */
@@ -919,7 +965,9 @@ serve(async (req) => {
       }
 
 case 'resposta_recebida': {
-  const { telefone, campanha_id, texto_resposta } = body;
+  const { telefone, campanha_id, texto_resposta, message_type, media_url } = body;
+  const tipoMensagemRecebida: string = message_type || 'text';
+  const ehMidiaRecebida = tipoMensagemRecebida !== 'text';
 
   if (!telefone || !texto_resposta) {
     return new Response(JSON.stringify({ error: 'telefone e texto_resposta obrigatorios' }), {
@@ -951,7 +999,7 @@ case 'resposta_recebida': {
   // Busca dados completos do contato na campanha (nome, contrato, curso, endereco)
   const { data: contatoCampanhaData } = await sb
     .from('contatos_campanha')
-    .select('id, nome, numero_contrato, curso, local, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem')
+    .select('id, nome, numero_contrato, status, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem')
     .eq('campanha_id', campanha.id)
     .eq('telefone', telefone)
     .maybeSingle();
@@ -977,6 +1025,8 @@ case 'resposta_recebida': {
       content: texto_resposta,
       sent_by: 'contato',
       seq: 0,
+      message_type: tipoMensagemRecebida,
+      media_url: media_url || null,
     });
     return new Response(JSON.stringify({ success: true, skipped: true, reason: 'manual_mode' }), {
       status: 200,
@@ -1001,6 +1051,49 @@ case 'resposta_recebida': {
       content: texto_resposta,
       sent_by: 'contato',
       seq: 0,
+      message_type: tipoMensagemRecebida,
+      media_url: media_url || null,
+    });
+  }
+
+  // A IA (Gemini, apenas texto) nao interpreta midia. Se o cliente mandou uma
+  // FOTO durante uma venda de material fotografico com status de compra
+  // confirmado, trata como comprovante de pagamento: encaminha pro vendedor
+  // e nao aciona a IA (nao ha resposta automatica adequada pra dar aqui).
+  if (ehMidiaRecebida) {
+    if (
+      tipoMensagemRecebida === 'image' &&
+      media_url &&
+      campanha.tipo_atendimento === 'venda_material' &&
+      ['interessado_compra', 'comprou'].includes(dadosContato.status || '')
+    ) {
+      console.log(`[Processor] Comprovante de pagamento recebido de ${nomeCompleto}`);
+
+      if (dadosContato.id) {
+        await sb
+          .from('contatos_campanha')
+          .update({ comprovante_url: media_url, comprovante_recebido_em: new Date().toISOString() })
+          .eq('id', dadosContato.id);
+      }
+
+      const legendaComprovante =
+        `📸 *Comprovante de pagamento recebido!*\n\n` +
+        `👤 *Nome:* ${nomeCompleto}\n` +
+        `📄 *Contrato:* ${dadosContato.numero_contrato || 'Nao informado'}\n\n` +
+        `👉 Confira o comprovante acima e finalize a liberacao do material.`;
+
+      await enviarMidiaUazapi(NUMERO_VENDEDOR_MATERIAL, media_url, 'image', legendaComprovante);
+
+      await sb.from('notificacoes_venda').insert({
+        contato_campanha_id: dadosContato.id || null,
+        campanha_id: campanha.id,
+        mensagem_enviada: legendaComprovante,
+      });
+    }
+
+    return new Response(JSON.stringify({ success: true, skipped: true, reason: 'midia_sem_resposta_automatica' }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 

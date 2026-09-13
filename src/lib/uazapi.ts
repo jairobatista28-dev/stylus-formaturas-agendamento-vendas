@@ -165,6 +165,65 @@ export async function sendMsg(phone: string, text: string): Promise<string> {
   return data?.key?.id || data?.id || data?.messageid || 'sent';
 }
 
+/**
+ * Envia midia (imagem, documento, audio ou video) via uazapiGO (POST /send/media).
+ * `file` aceita URL publica ou uma string base64 (ex: data URI ou base64 puro,
+ * a uazapi aceita ambos). Retorna a fileUrl publica que a uazapi gera pro
+ * arquivo enviado (util pra salvar em `messages.media_url`).
+ */
+export async function sendMedia(
+  phone: string,
+  file: string,
+  tipo: 'image' | 'video' | 'document' | 'audio' | 'ptt' = 'image',
+  legenda?: string,
+  docName?: string
+): Promise<{ messageId: string; fileUrl: string | null }> {
+  let settings = getSettings();
+  if (!settings.apiUrl || !settings.apiToken) {
+    settings = await fetchSettingsFromSupabase();
+  }
+
+  if (!settings.apiUrl || !settings.apiToken) {
+    throw new Error('Configure as credenciais do WhatsApp em Configuracoes');
+  }
+
+  let cleanPhone = phone.replace(/\D/g, '');
+  if (!cleanPhone.startsWith('55')) {
+    cleanPhone = `55${cleanPhone}`;
+  }
+
+  const baseUrl = settings.apiUrl.replace(/\/$/, '');
+
+  console.log(`[Uazapi] Enviando midia (${tipo}) para ${cleanPhone}...`);
+
+  const res = await fetch(`${baseUrl}/send/media`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'token': settings.apiToken,
+    },
+    body: JSON.stringify({
+      number: cleanPhone,
+      type: tipo,
+      file,
+      ...(legenda ? { text: legenda } : {}),
+      ...(docName ? { docName } : {}),
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Uazapi erro ${res.status}: ${err}`);
+  }
+
+  const data = await res.json();
+  console.log(`[Uazapi] Midia enviada com sucesso`);
+  return {
+    messageId: data?.key?.id || data?.id || data?.messageid || 'sent',
+    fileUrl: data?.response?.fileUrl || data?.fileUrl || null,
+  };
+}
+
 export async function getInstanceStatus(): Promise<{ connected: boolean; status: string }> {
   // Sempre busca fresco do Supabase antes de checar status
   const settings = await fetchSettingsFromSupabase();

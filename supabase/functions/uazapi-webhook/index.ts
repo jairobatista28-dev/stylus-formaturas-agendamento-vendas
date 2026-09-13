@@ -296,6 +296,89 @@ async function enviarMensagemUazapi(telefone: string, texto: string): Promise<vo
   }
 }
 
+/**
+ * Envia midia (imagem, documento, audio, video) via Uazapi (POST /send/media).
+ * `file` aceita URL publica ou base64. `tipo` segue o enum da uazapi:
+ * image | video | videoplay | document | audio | myaudio | ptt | ptv | sticker.
+ */
+async function enviarMidiaUazapi(
+  telefone: string,
+  file: string,
+  tipo: 'image' | 'video' | 'document' | 'audio' | 'ptt' = 'image',
+  legenda?: string,
+  docName?: string
+): Promise<boolean> {
+  const uazapiUrl = Deno.env.get('UAZAPI_BASE_URL')?.trim();
+  const uazapiToken = Deno.env.get('UAZAPI_TOKEN')?.trim();
+  if (!uazapiUrl || !uazapiToken || !file) {
+    console.error('[Uazapi] Configuracao ausente ou arquivo vazio - abortando envio de midia');
+    return false;
+  }
+  try {
+    const resp = await fetch(`${uazapiUrl}/send/media`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'token': uazapiToken,
+      },
+      body: JSON.stringify({
+        number: telefone,
+        type: tipo,
+        file,
+        ...(legenda ? { text: legenda } : {}),
+        ...(docName ? { docName } : {}),
+      }),
+    });
+    const respBody = await resp.text();
+    console.log(`[Uazapi] Midia - Status HTTP: ${resp.status} | Corpo: ${respBody}`);
+    if (!resp.ok) {
+      console.error(`[Uazapi] FALHA no envio de midia - status ${resp.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[Uazapi] Erro de rede ao enviar midia:', err);
+    return false;
+  }
+}
+
+/**
+ * Baixa (via Uazapi) o arquivo de uma mensagem de midia recebida e retorna a
+ * URL publica hospedada pela Uazapi (valida por ~2 dias). Usa `return_link`
+ * (padrao true), sem pedir base64 pra nao pesar o payload.
+ */
+async function baixarMidiaUazapi(messageId: string): Promise<{ fileUrl: string | null; mimetype: string | null }> {
+  const uazapiUrl = Deno.env.get('UAZAPI_BASE_URL')?.trim();
+  const uazapiToken = Deno.env.get('UAZAPI_TOKEN')?.trim();
+  if (!uazapiUrl || !uazapiToken || !messageId) {
+    console.error('[Uazapi] Configuracao ausente ou messageId vazio - abortando download de midia');
+    return { fileUrl: null, mimetype: null };
+  }
+  try {
+    const resp = await fetch(`${uazapiUrl}/message/download`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'token': uazapiToken,
+      },
+      body: JSON.stringify({ id: messageId, return_link: true, return_base64: false }),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      console.error(`[Uazapi] FALHA ao baixar midia - status ${resp.status}: ${err}`);
+      return { fileUrl: null, mimetype: null };
+    }
+    const data = await resp.json();
+    return { fileUrl: data?.fileURL || data?.fileUrl || null, mimetype: data?.mimetype || null };
+  } catch (err) {
+    console.error('[Uazapi] Erro de rede ao baixar midia:', err);
+    return { fileUrl: null, mimetype: null };
+  }
+}
+
+// Tipos de mensagem da uazapi que representam midia (nao texto puro)
+const TIPOS_MIDIA = ['image', 'video', 'document', 'audio', 'ptt', 'sticker'];
+
 // Numero do vendedor (Square) que recebe a notificacao quando um formando
 // confirma interesse em comprar o material fotografico. Formato internacional.
 const NUMERO_VENDEDOR_MATERIAL_LEGADO = '5592993809136';
@@ -913,17 +996,43 @@ serve(async (req) => {
       });
     }
 
-    // Extrai telefone e texto
+    // Extrai telefone, tipo de mensagem e texto/legenda
     const remoteJid = msg?.chatid || (body as any).chat?.wa_chatid || '';
     const telefoneCliente = remoteJid.split('@')[0];
-    const textoRecebido = msg?.text || msg?.content?.text || (body as any).chat?.wa_lastMessageTextVote || '';
-
-    if (!telefoneCliente || !textoRecebido) {
-      return new Response('OK', { headers: corsHeaders });
-    }
+    const tipoMensagem = (msg?.messageType || '').toLowerCase();
+    const ehMidia = TIPOS_MIDIA.includes(tipoMensagem);
+    const legendaOuTexto = msg?.text || msg?.content?.text || (body as any).chat?.wa_lastMessageTextVote || '';
 
     // Extrai message_id de todos os locais possiveis do payload da uazapi
     const rawMessageId = msg?.key?.id || data?.key?.id || (body as any).key?.id || '';
+
+    // So descarta se nao tiver telefone, ou se nao tiver nem texto nem midia
+    if (!telefoneCliente || (!legendaOuTexto && !ehMidia)) {
+      return new Response('OK', { headers: corsHeaders });
+    }
+
+    // Se for midia (foto, documento, audio...), baixa o arquivo na Uazapi pra
+    // obter uma URL publica que possamos salvar/encaminhar
+    let mediaUrlRecebida: string | null = null;
+    if (ehMidia && rawMessageId) {
+      const download = await baixarMidiaUazapi(rawMessageId);
+      mediaUrlRecebida = download.fileUrl;
+      console.log(`[Webhook] Midia (${tipoMensagem}) baixada: ${mediaUrlRecebida || 'FALHOU'}`);
+    }
+
+    const placeholdersPorTipoMidia: Record<string, string> = {
+      image: '[Imagem recebida]',
+      video: '[Video recebido]',
+      document: '[Documento recebido]',
+      audio: '[Audio recebido]',
+      ptt: '[Audio recebido]',
+      sticker: '[Figurinha recebida]',
+    };
+
+    // Texto usado no historico/dedup/IA: legenda quando houver, senao um
+    // placeholder legivel de acordo com o tipo de midia
+    const textoRecebido = legendaOuTexto || placeholdersPorTipoMidia[tipoMensagem] || '[Midia recebida]';
+
     const telefoneNormalizado = normalizePhone(telefoneCliente);
 
     console.log(`[Webhook] Mensagem de ${telefoneCliente}: "${textoRecebido}"`);
@@ -965,8 +1074,48 @@ serve(async (req) => {
         direction: 'in',
         content: textoRecebido,
         sent_by: 'contato',
+        message_type: ehMidia ? tipoMensagem : 'text',
+        media_url: mediaUrlRecebida,
       });
       await sb.from('contacts').update({ unread_count: (contatoManual.unread_count || 0) + 1 }).eq('id', contatoManual.id);
+
+      // Se o cliente mandou uma FOTO e ele tem uma venda de material fotografico
+      // pendente (link de pagamento ja enviado), trata como comprovante de
+      // pagamento: encaminha pro vendedor (Square) e registra no contato da campanha
+      if (tipoMensagem === 'image' && mediaUrlRecebida) {
+        const { data: contatoVendaComprovante } = await sb
+          .from('contatos_campanha')
+          .select('id, campanha_id, nome, numero_contrato, status, campanhas!inner(tipo_atendimento)')
+          .eq('telefone', telefoneNormalizado)
+          .eq('campanhas.tipo_atendimento', 'venda_material')
+          .in('status', ['interessado_compra', 'comprou'])
+          .order('atualizado_em', { ascending: false })
+          .maybeSingle();
+
+        if (contatoVendaComprovante) {
+          console.log(`[Webhook] Comprovante de pagamento recebido de ${contatoVendaComprovante.nome}`);
+
+          await sb
+            .from('contatos_campanha')
+            .update({ comprovante_url: mediaUrlRecebida, comprovante_recebido_em: new Date().toISOString() })
+            .eq('id', contatoVendaComprovante.id);
+
+          const legendaComprovante =
+            `📸 *Comprovante de pagamento recebido!*\n\n` +
+            `👤 *Nome:* ${contatoVendaComprovante.nome}\n` +
+            `📄 *Contrato:* ${contatoVendaComprovante.numero_contrato || 'Nao informado'}\n\n` +
+            `👉 Confira o comprovante acima e finalize a liberacao do material.`;
+
+          await enviarMidiaUazapi(NUMERO_VENDEDOR_MATERIAL_LEGADO, mediaUrlRecebida, 'image', legendaComprovante);
+
+          await sb.from('notificacoes_venda').insert({
+            contato_campanha_id: contatoVendaComprovante.id,
+            campanha_id: contatoVendaComprovante.campanha_id,
+            mensagem_enviada: legendaComprovante,
+          });
+        }
+      }
+
       return new Response(JSON.stringify({ success: true, skipped: true, reason: 'manual_mode' }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -997,6 +1146,8 @@ serve(async (req) => {
             telefone: telefoneNormalizado,
             campanha_id: conversaEstado.campanha_id,
             texto_resposta: textoRecebido,
+            message_type: ehMidia ? tipoMensagem : 'text',
+            media_url: mediaUrlRecebida,
           }),
         });
       } catch (err) {

@@ -121,6 +121,8 @@ export interface Message {
   created_at: string;
   status?: 'sent' | 'delivered' | 'read';
   seq?: number;
+  message_type?: 'text' | 'image' | 'video' | 'document' | 'audio' | 'ptt' | 'sticker';
+  media_url?: string | null;
 }
 
 export interface MessageTemplate {

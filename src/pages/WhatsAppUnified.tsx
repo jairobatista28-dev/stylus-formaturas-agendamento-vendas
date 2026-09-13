@@ -13,9 +13,10 @@ import {
   CheckCheck,
   Trash2,
   CheckCircle2,
+  Paperclip,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { sendMsg } from '../lib/uazapi';
+import { sendMsg, sendMedia } from '../lib/uazapi';
 import { useToast } from '../hooks/useToast';
 import { ToastContainer } from '../components/Toast';
 import { WhatsAppConnection } from '../components/WhatsAppConnection';
@@ -42,6 +43,8 @@ export function WhatsAppUnified() {
   const [contactFilter, setContactFilter] = useState<ContactFilter>('todos');
   const [contactSearch, setContactSearch] = useState('');
   const [messageInput, setMessageInput] = useState('');
+  const [sendingImage, setSendingImage] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const [isManualMode, setIsManualMode] = useState(true);
 
   const [showNewContactModal, setShowNewContactModal] = useState(false);
@@ -567,6 +570,62 @@ fetchMessages(selectedContact.id);
     }
   };
 
+  const handleSelectImage = () => {
+    imageInputRef.current?.click();
+  };
+
+  const handleImageFileChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !selectedContact) return;
+
+    if (!file.type.startsWith('image/')) {
+      showToast('Selecione um arquivo de imagem', 'error');
+      return;
+    }
+
+    setSendingImage(true);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error('Falha ao ler o arquivo'));
+        reader.readAsDataURL(file);
+      });
+
+      const legenda = messageInput.trim() || undefined;
+      const sentBy = isManualMode ? 'manual' : 'ia';
+
+      const { fileUrl } = await sendMedia(selectedContact.phone, base64, 'image', legenda);
+
+      const { error } = await supabase.from('messages').insert({
+        contact_id: selectedContact.id,
+        direction: 'out',
+        content: legenda || '[Imagem enviada]',
+        sent_by: sentBy,
+        delivered: true,
+        read: false,
+        message_type: 'image',
+        media_url: fileUrl || base64,
+      });
+
+      if (!error) {
+        setMessageInput('');
+        shouldAutoScrollRef.current = true;
+        fetchMessages(selectedContact.id);
+        fetchContacts(true);
+        showToast('Imagem enviada', 'success');
+      } else {
+        showToast('Enviada no WhatsApp, mas erro ao salvar no banco', 'error');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+      showToast(`Erro ao enviar imagem: ${msg}`, 'error');
+    } finally {
+      setSendingImage(false);
+    }
+  };
+
   const handleDeleteMessage = async (messageId: string) => {
     if (!confirm('Excluir esta mensagem?')) return;
     const { error } = await supabase.from('messages').delete().eq('id', messageId);
@@ -1064,7 +1123,19 @@ const formatTime = (dateStr: string) => {
                                 </span>
                               </div>
                             )}
-                            <p style={{ color: 'var(--text-primary)' }}>{msg.content}</p>
+                            {msg.message_type === 'image' && msg.media_url && (
+                              <a href={msg.media_url} target="_blank" rel="noopener noreferrer">
+                                <img
+                                  src={msg.media_url}
+                                  alt="Imagem enviada"
+                                  className="rounded mb-1"
+                                  style={{ maxWidth: '220px', maxHeight: '220px', display: 'block' }}
+                                />
+                              </a>
+                            )}
+                            {!(msg.message_type && msg.message_type !== 'text' && /^\[.*\]$/.test(msg.content || '')) && (
+                              <p style={{ color: 'var(--text-primary)' }}>{msg.content}</p>
+                            )}
                             <div className="flex items-center justify-end gap-1 mt-1">
                               <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>
                                 {formatTime(msg.created_at)}
@@ -1119,6 +1190,26 @@ const formatTime = (dateStr: string) => {
                     </button>
                   </div>
                   <div className="flex items-end gap-2">
+                    <input
+                      ref={imageInputRef}
+                      type="file"
+                      accept="image/*"
+                      style={{ display: 'none' }}
+                      onChange={handleImageFileChosen}
+                    />
+                    <button
+                      onClick={handleSelectImage}
+                      disabled={sendingImage}
+                      className="btn-primary"
+                      title="Enviar imagem"
+                      style={{
+                        padding: '10px 12px',
+                        backgroundColor: 'var(--bg-surface-raised)',
+                        color: 'var(--text-primary)',
+                      }}
+                    >
+                      {sendingImage ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
+                    </button>
                     <textarea
                       value={messageInput}
                       onChange={(e) => setMessageInput(e.target.value)}
