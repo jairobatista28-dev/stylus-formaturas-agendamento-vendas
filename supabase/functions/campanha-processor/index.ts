@@ -642,6 +642,12 @@ momento, agradeca, confirme o plano escolhido e informe que o time vai finalizar
 com ele. Inclua OBRIGATORIAMENTE ao final da resposta o marcador tecnico exato:
 ###QUER_COMPRAR###{"plano_escolhido":"TEXTO_DO_PLANO","forma_pagamento_escolhida":"TEXTO_DA_FORMA"}###FIM###
 
+CRITICO SOBRE O CAMPO "plano_escolhido": coloque APENAS a opcao especifica que o formando
+efetivamente aceitou/confirmou (ex: "R$ 800,00 a vista" OU "6x de R$ 200,00 no cartao"),
+NUNCA o texto bruto com todas as opcoes juntas (ex: nunca "800,00 a vista ou no cartao em
+6 parcelas de 200,00"). Se o formando nao deixou claro qual das opcoes escolheu, pergunte
+antes de gerar o marcador - nunca gere ###QUER_COMPRAR### com as duas opcoes misturadas.
+
 Se o formando demonstrar que nao tem interesse, inclua: ###SEM_INTERESSE###
 Se precisar transferir para atendimento humano, inclua: ###OVERFLOW###
 
