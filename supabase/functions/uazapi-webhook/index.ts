@@ -477,9 +477,16 @@ async function executarFluxoIaPadrao(
   const historico = (mensagens || []).reverse();
   const textosFormandoSaaS = (mensagens || []).filter((m: any) => m.direction === 'in').map((m: any) => (m.content || '').toLowerCase());
 
-  const { data: baseConhecimento } = await sb
+  const { data: baseConhecimentoBrutaPadrao } = await sb
     .from('base_conhecimento_global')
-    .select('pergunta, resposta');
+    .select('pergunta, resposta, aplica_em')
+    .eq('ativo', true);
+
+  // Sem campanha ativa (fluxo padrao), so faz sentido usar as perguntas
+  // genericas ("todos"), nunca as especificas de agendamento ou venda de material
+  const baseConhecimento = (baseConhecimentoBrutaPadrao || []).filter(
+    (item: any) => (item.aplica_em || 'todos') === 'todos'
+  );
 
   const resposta = await chamarGemini('', texto, {
     nome: contato.name || 'Formando',
@@ -743,10 +750,18 @@ async function executarFluxoCampanha(
     quantidade_fotos: contatoCampanha.quantidade_fotos,
   };
 
-  // Busca base de conhecimento global
-  const { data: baseConhecimento } = await sb
+  // Busca base de conhecimento global (filtrada pelo tipo de atendimento da campanha,
+  // pra nao misturar respostas pensadas pra agendamento/visita com venda de material)
+  const { data: baseConhecimentoBruta } = await sb
     .from('base_conhecimento_global')
-    .select('pergunta, resposta');
+    .select('pergunta, resposta, aplica_em')
+    .eq('ativo', true);
+
+  const tipoAtendimentoCampanha = campanha?.tipo_atendimento || 'todos';
+  const baseConhecimento = (baseConhecimentoBruta || []).filter((item: any) => {
+    const escopo = item.aplica_em || 'todos';
+    return escopo === 'todos' || escopo === tipoAtendimentoCampanha;
+  });
 
   // Se ja agendado, busca agendamento mais recente para contexto
   let promptComContexto = promptIa;

@@ -399,13 +399,18 @@ async function logarEnvio(sb: any, campanhaId: string, telefone: string, sucesso
 }
 
 /**
- * Busca base de conhecimento global
+ * Busca base de conhecimento global, filtrando pelo escopo (aplica_em):
+ * entradas marcadas como "todos" sempre aparecem; entradas marcadas
+ * especificamente para "agendamento" ou "venda_material" só aparecem
+ * na campanha do tipo correspondente. Isso evita que uma resposta pensada
+ * pra um tipo de campanha (ex: "valores no ato da visita") vaze pra outro
+ * tipo onde ela nao faz sentido (ex: venda direta, sem visita).
  */
-async function buscarBaseConhecimentoGlobal(sb: any): Promise<string> {
+async function buscarBaseConhecimentoGlobal(sb: any, tipoAtendimento: string = 'todos'): Promise<string> {
   try {
     const { data, error } = await sb
       .from('base_conhecimento_global')
-      .select('pergunta, resposta')
+      .select('pergunta, resposta, aplica_em')
       .eq('ativo', true)
       .order('ordem', { ascending: true });
 
@@ -413,7 +418,16 @@ async function buscarBaseConhecimentoGlobal(sb: any): Promise<string> {
       return '';
     }
 
-    const formatted = data.map((item: any) =>
+    const filtrado = data.filter((item: any) => {
+      const escopo = item.aplica_em || 'todos';
+      return escopo === 'todos' || escopo === tipoAtendimento;
+    });
+
+    if (filtrado.length === 0) {
+      return '';
+    }
+
+    const formatted = filtrado.map((item: any) =>
       `P: ${item.pergunta}\nR: ${item.resposta}`
     ).join('\n---\n');
 
@@ -527,7 +541,7 @@ async function chamarGemini(
   }
 
   try {
-    const baseGlobal = await buscarBaseConhecimentoGlobal(sb);
+    const baseGlobal = await buscarBaseConhecimentoGlobal(sb, tipoAtendimento);
 
     let systemInstruction = '';
 

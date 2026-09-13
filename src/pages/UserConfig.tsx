@@ -31,6 +31,7 @@ interface BaseConhecimento {
   resposta: string;
   ordem: number;
   ativo: boolean;
+  aplica_em?: 'todos' | 'agendamento' | 'venda_material';
 }
 
 export function UserConfig() {
@@ -53,7 +54,7 @@ export function UserConfig() {
   const [isSavingBase, setIsSavingBase] = useState(false);
   const [showBaseModal, setShowBaseModal] = useState(false);
   const [editingBase, setEditingBase] = useState<BaseConhecimento | null>(null);
-  const [baseForm, setBaseForm] = useState({ pergunta: '', resposta: '', ordem: 0, ativo: true });
+  const [baseForm, setBaseForm] = useState({ pergunta: '', resposta: '', ordem: 0, ativo: true, aplica_em: 'todos' as 'todos' | 'agendamento' | 'venda_material' });
 
   const { showToast } = useToast();
 
@@ -228,6 +229,7 @@ export function UserConfig() {
             resposta: baseForm.resposta.trim(),
             ordem: baseForm.ordem,
             ativo: baseForm.ativo,
+            aplica_em: baseForm.aplica_em,
             updated_at: new Date().toISOString(),
           })
           .eq('id', editingBase.id);
@@ -241,6 +243,7 @@ export function UserConfig() {
           resposta: baseForm.resposta.trim(),
           ordem: baseForm.ordem || baseConhecimento.length,
           ativo: baseForm.ativo,
+          aplica_em: baseForm.aplica_em,
         });
 
         if (error) throw error;
@@ -249,7 +252,7 @@ export function UserConfig() {
 
       setShowBaseModal(false);
       setEditingBase(null);
-      setBaseForm({ pergunta: '', resposta: '', ordem: 0, ativo: true });
+      setBaseForm({ pergunta: '', resposta: '', ordem: 0, ativo: true, aplica_em: 'todos' });
       loadBaseConhecimento();
     } catch (err) {
       console.error('Erro ao salvar:', err);
@@ -295,6 +298,7 @@ export function UserConfig() {
       resposta: item.resposta,
       ordem: item.ordem,
       ativo: item.ativo,
+      aplica_em: item.aplica_em || 'todos',
     });
     setShowBaseModal(true);
   };
@@ -306,6 +310,7 @@ export function UserConfig() {
       resposta: '',
       ordem: baseConhecimento.length,
       ativo: true,
+      aplica_em: 'todos',
     });
     setShowBaseModal(true);
   };
@@ -608,6 +613,29 @@ export function UserConfig() {
                         >
                           #{item.ordem + 1}
                         </span>
+                        <span
+                          className="text-xs px-2 py-0.5 rounded"
+                          style={{
+                            backgroundColor:
+                              item.aplica_em === 'agendamento'
+                                ? 'rgba(59, 130, 246, 0.15)'
+                                : item.aplica_em === 'venda_material'
+                                  ? 'rgba(139, 92, 246, 0.15)'
+                                  : 'var(--bg-surface-raised)',
+                            color:
+                              item.aplica_em === 'agendamento'
+                                ? '#3B82F6'
+                                : item.aplica_em === 'venda_material'
+                                  ? '#8B5CF6'
+                                  : 'var(--text-muted)',
+                          }}
+                        >
+                          {item.aplica_em === 'agendamento'
+                            ? 'Agendamento'
+                            : item.aplica_em === 'venda_material'
+                              ? 'Venda de Material'
+                              : 'Todas as campanhas'}
+                        </span>
                         <p className="font-medium text-sm" style={{ color: 'var(--text-primary)' }}>
                           {item.pergunta}
                         </p>
@@ -784,6 +812,27 @@ export function UserConfig() {
                   rows={4}
                   placeholder="Ex: Aceitamos cartao de credito, debito, PIX e boleto..."
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>
+                  Aplica-se a
+                </label>
+                <select
+                  value={baseForm.aplica_em}
+                  onChange={(e) =>
+                    setBaseForm({ ...baseForm, aplica_em: e.target.value as 'todos' | 'agendamento' | 'venda_material' })
+                  }
+                  className="input-dark w-full"
+                >
+                  <option value="todos">Todas as campanhas</option>
+                  <option value="agendamento">Somente campanhas de agendamento/visita</option>
+                  <option value="venda_material">Somente venda de material fotografico</option>
+                </select>
+                <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                  Use isso pra evitar que uma resposta pensada pra um tipo de campanha (ex: "no ato
+                  da visita") apareca em outro tipo onde nao faz sentido (ex: venda direta, sem visita).
+                </p>
               </div>
 
               <div>
