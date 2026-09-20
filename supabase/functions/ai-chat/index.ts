@@ -126,6 +126,24 @@ REGRA CRITICA DE REMARCACAO E CANCELAMENTO:
     systemPrompt = systemPrompt.replace(/\{\{?curso\}?\}/gi, contact.course || 'Nao informado');
     systemPrompt = systemPrompt.replace(/\{\{?numero_contrato\}?\}/gi, contact.contract_number || 'Nao informado');
 
+    // 6b. Injeta a data/hora REAIS (fuso de Brasilia) para a IA nunca
+    // "alucinar" uma data errada (ex: usar uma data do proprio treinamento
+    // dela em vez do dia real de hoje).
+    const agora = new Date();
+    const dataHoraAtualBR = agora.toLocaleString('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      weekday: 'long',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    systemPrompt +=
+      `\n\nDATA E HORA ATUAIS REAIS (fuso de Brasilia): ${dataHoraAtualBR}. ` +
+      'Use SEMPRE esta informacao como referencia para "hoje", "amanha", "essa semana", etc. ' +
+      'NUNCA use uma data do seu proprio conhecimento/treinamento - a informacao acima e a unica correta.';
+
     // 7. Call Gemini
     const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
     console.log('[AI-Chat] GEMINI_API_KEY presente:', !!geminiApiKey);

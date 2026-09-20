@@ -246,6 +246,25 @@ O marcador ###AGENDAMENTO_CONFIRMADO###...###FIM### e OBRIGATORIO e deve vir sem
 - Seja simpatica e profissional`;
     }
 
+    // Injeta a data/hora REAIS (fuso de Brasilia) para a IA nunca
+    // "alucinar" uma data errada (ex: usar uma data do proprio treinamento
+    // dela em vez do dia real de hoje). Aplicado sempre, tanto no prompt
+    // personalizado da campanha quanto no prompt default.
+    const agora = new Date();
+    const dataHoraAtualBR = agora.toLocaleString('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      weekday: 'long',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    systemPrompt +=
+      `\n\nDATA E HORA ATUAIS REAIS (fuso de Brasilia): ${dataHoraAtualBR}. ` +
+      'Use SEMPRE esta informacao como referencia para "hoje", "amanha", "essa semana", etc. ' +
+      'NUNCA use uma data do seu proprio conhecimento/treinamento - a informacao acima e a unica correta.';
+
     console.log('[Gemini] System Prompt (final):', systemPrompt.substring(0, 300) + '...');
     console.log('[Gemini] Mensagem do usuario:', textoUsuario);
     console.log('[Gemini] Historico tem', history.length, 'mensagens');
