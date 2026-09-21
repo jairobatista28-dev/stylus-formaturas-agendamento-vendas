@@ -7,15 +7,27 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+// Normaliza telefone: remove nao-digitos, garante o "9" no celular BR e o
+// codigo do pais 55. Mesma logica usada em uazapi-webhook/index.ts - as duas
+// funcoes precisam gerar EXATAMENTE o mesmo resultado pro mesmo numero, senao
+// o mesmo contato acaba duplicado no banco (um criado ao disparar a campanha,
+// outro quando a pessoa responde de verdade pelo WhatsApp).
 function normalizePhone(phone: string): string {
-  let p = phone.replace(/\D/g, "");
-  if (p.startsWith("55") && p.length > 12) {
-    return p;
+  if (!phone) return "";
+  let digits = phone.replace(/\D/g, "");
+
+  // Remove o codigo do pais se ja existir, para padronizar o processamento
+  if (digits.startsWith("55") && digits.length > 11) {
+    digits = digits.slice(2);
   }
-  if (p.length === 11 || p.length === 10) {
-    return "55" + p;
+
+  // Numero de celular BR com DDD: 11 digitos (DDD + 9 + numero)
+  // Se vier com 10 digitos (sem o 9), adiciona o 9
+  if (digits.length === 10) {
+    digits = digits.slice(0, 2) + "9" + digits.slice(2);
   }
-  return p;
+
+  return "55" + digits;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
