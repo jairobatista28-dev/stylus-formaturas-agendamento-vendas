@@ -29,6 +29,12 @@ interface ContactWithLastMsg extends Contact {
   lastAppointment?: { date: string; shift: string; status: string };
   tipo_atendimento_campanha?: string;
   vendaProdutoConcluida?: boolean;
+  campanhaContatoId?: string;
+  valorTabela?: number | null;
+  valorOferecido?: number | null;
+  planoEscolhido?: string | null;
+  formaPagamentoEscolhida?: string | null;
+  formasPagamento?: string | null;
 }
 
 export function WhatsAppUnified() {
@@ -374,16 +380,33 @@ const fetchContacts = async (silent = false) => {
       const contactPhones = (contactsData as Contact[]).map((c) => c.phone);
       const { data: campanhaContatos } = await supabase
         .from('contatos_campanha')
-        .select('telefone, numero_contrato, curso, status, campanhas(tipo_atendimento)')
+        .select('id, telefone, numero_contrato, curso, status, valor_tabela, valor_oferecido, plano_escolhido, forma_pagamento_escolhida, formas_pagamento, campanhas(tipo_atendimento)')
         .in('telefone', contactPhones);
 
-      const campanhaByPhone = new Map<string, { numero_contrato: string | null; curso: string | null; tipo_atendimento?: string; status?: string }>();
+      const campanhaByPhone = new Map<string, {
+        id: string;
+        numero_contrato: string | null;
+        curso: string | null;
+        tipo_atendimento?: string;
+        status?: string;
+        valor_tabela?: number | null;
+        valor_oferecido?: number | null;
+        plano_escolhido?: string | null;
+        forma_pagamento_escolhida?: string | null;
+        formas_pagamento?: string | null;
+      }>();
       (campanhaContatos || []).forEach((cc: any) => {
         campanhaByPhone.set(cc.telefone, {
+          id: cc.id,
           numero_contrato: cc.numero_contrato,
           curso: cc.curso,
           tipo_atendimento: cc.campanhas?.tipo_atendimento,
           status: cc.status,
+          valor_tabela: cc.valor_tabela,
+          valor_oferecido: cc.valor_oferecido,
+          plano_escolhido: cc.plano_escolhido,
+          forma_pagamento_escolhida: cc.forma_pagamento_escolhida,
+          formas_pagamento: cc.formas_pagamento,
         });
       });
 
@@ -395,6 +418,12 @@ const fetchContacts = async (silent = false) => {
           course: contact.course || campanhaData?.curso || undefined,
           tipo_atendimento_campanha: campanhaData?.tipo_atendimento,
           vendaProdutoConcluida: campanhaData?.status === 'comprou',
+          campanhaContatoId: campanhaData?.id,
+          valorTabela: campanhaData?.valor_tabela,
+          valorOferecido: campanhaData?.valor_oferecido,
+          planoEscolhido: campanhaData?.plano_escolhido,
+          formaPagamentoEscolhida: campanhaData?.forma_pagamento_escolhida,
+          formasPagamento: campanhaData?.formas_pagamento,
           lastMessage: lastMsgByContact.get(contact.id),
           lastAppointment: lastAptByContact.get(contact.id),
         };
@@ -672,6 +701,32 @@ fetchMessages(selectedContact.id);
     }
   };
 
+  const handleMarkAsSold = async () => {
+    if (!selectedContact) return;
+
+    if (!selectedContact.campanhaContatoId) {
+      showToast('Este contato nao esta vinculado a uma campanha de vendas', 'error');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('contatos_campanha')
+      .update({ status: 'comprou' })
+      .eq('id', selectedContact.campanhaContatoId);
+
+    if (error) {
+      showToast('Erro ao marcar como vendido: ' + error.message, 'error');
+      return;
+    }
+
+    const updated = { ...selectedContact, vendaProdutoConcluida: true };
+    setSelectedContact(updated);
+    setContacts((prev) =>
+      prev.map((c) => (c.id === selectedContact.id ? updated : c))
+    );
+    showToast('Marcado como Vendido!', 'success');
+  };
+
   const handleSaveSettings = async () => {
     const updates = [
       { key: 'min_delay_seconds', value: tempSettings.min_delay_seconds.toString() },
@@ -709,6 +764,11 @@ fetchMessages(selectedContact.id);
       content = content.replace(/\{\{curso\}\}/g, selectedContact.course || '');
     }
     setMessageInput(content);
+  };
+
+  const formatCurrency = (value?: number | null): string | null => {
+    if (value === null || value === undefined) return null;
+    return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
   };
 
   const formatPhoneDisplay = (phone: string): string => {
@@ -1018,6 +1078,20 @@ const formatTime = (dateStr: string) => {
                           )}
                         </div>
                       )}
+                      {selectedContact.vendaProdutoConcluida && (
+                        <div className="flex items-center gap-1.5 text-[11px]" style={{ color: '#22C55E' }}>
+                          <CheckCircle2 size={11} />
+                          <span>
+                            Vendido
+                            {(formatCurrency(selectedContact.valorOferecido) || formatCurrency(selectedContact.valorTabela)) && (
+                              <> · {formatCurrency(selectedContact.valorOferecido) || formatCurrency(selectedContact.valorTabela)}</>
+                            )}
+                            {(selectedContact.formaPagamentoEscolhida || selectedContact.formasPagamento) && (
+                              <> · {selectedContact.formaPagamentoEscolhida || selectedContact.formasPagamento}</>
+                            )}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1037,6 +1111,16 @@ const formatTime = (dateStr: string) => {
                       <Bot size={12} />
                       Para IA
                     </button>
+                    {!selectedContact.vendaProdutoConcluida && (
+                      <button
+                        onClick={handleMarkAsSold}
+                        className="btn-secondary"
+                        style={{ padding: '6px 10px', fontSize: '11px', backgroundColor: '#22C55E', color: 'white' }}
+                      >
+                        <CheckCircle2 size={12} />
+                        Vendido
+                      </button>
+                    )}
                     <button
                       onClick={() => setShowScheduleModal(true)}
                       className="btn-primary"
