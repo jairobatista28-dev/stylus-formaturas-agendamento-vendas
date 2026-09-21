@@ -28,6 +28,7 @@ interface ContactWithLastMsg extends Contact {
   lastMessage?: Message;
   lastAppointment?: { date: string; shift: string; status: string };
   tipo_atendimento_campanha?: string;
+  vendaProdutoConcluida?: boolean;
 }
 
 export function WhatsAppUnified() {
@@ -347,16 +348,11 @@ const fetchContacts = async (silent = false) => {
     if (!error && contactsData) {
       const contactIds = contactsData.map((c) => c.id);
 
-      // Busca so a ultima mensagem de cada contato via funcao no banco
-      // (evita o limite de 1000 linhas do PostgREST que fazia contatos
-      // antigos aparecerem como "Nenhuma mensagem" quando o volume total
-      // de mensagens do sistema crescia).
-      const { data: lastMessages, error: lastMessagesError } = await supabase
-        .rpc('get_last_messages', { p_contact_ids: contactIds });
-
-      if (lastMessagesError) {
-        console.error('[WhatsApp] Erro ao buscar ultimas mensagens:', lastMessagesError);
-      }
+      const { data: allMessages } = await supabase
+        .from('messages')
+        .select('*')
+        .in('contact_id', contactIds)
+        .order('created_at', { ascending: false });
 
       const { data: allAppointments } = await supabase
         .from('appointments')
@@ -365,8 +361,8 @@ const fetchContacts = async (silent = false) => {
         .order('created_at', { ascending: false });
 
       const lastMsgByContact = new Map<string, Message>();
-      (lastMessages || []).forEach((m: Message) => {
-        lastMsgByContact.set(m.contact_id, m);
+      (allMessages || []).forEach((m) => {
+        if (!lastMsgByContact.has(m.contact_id)) lastMsgByContact.set(m.contact_id, m as Message);
       });
 
       const lastAptByContact = new Map<string, { date: string; shift: string; status: string }>();
@@ -378,15 +374,16 @@ const fetchContacts = async (silent = false) => {
       const contactPhones = (contactsData as Contact[]).map((c) => c.phone);
       const { data: campanhaContatos } = await supabase
         .from('contatos_campanha')
-        .select('telefone, numero_contrato, curso, campanhas(tipo_atendimento)')
+        .select('telefone, numero_contrato, curso, status, campanhas(tipo_atendimento)')
         .in('telefone', contactPhones);
 
-      const campanhaByPhone = new Map<string, { numero_contrato: string | null; curso: string | null; tipo_atendimento?: string }>();
+      const campanhaByPhone = new Map<string, { numero_contrato: string | null; curso: string | null; tipo_atendimento?: string; status?: string }>();
       (campanhaContatos || []).forEach((cc: any) => {
         campanhaByPhone.set(cc.telefone, {
           numero_contrato: cc.numero_contrato,
           curso: cc.curso,
           tipo_atendimento: cc.campanhas?.tipo_atendimento,
+          status: cc.status,
         });
       });
 
@@ -397,6 +394,7 @@ const fetchContacts = async (silent = false) => {
           contract_number: contact.contract_number || campanhaData?.numero_contrato || undefined,
           course: contact.course || campanhaData?.curso || undefined,
           tipo_atendimento_campanha: campanhaData?.tipo_atendimento,
+          vendaProdutoConcluida: campanhaData?.status === 'comprou',
           lastMessage: lastMsgByContact.get(contact.id),
           lastAppointment: lastAptByContact.get(contact.id),
         };
@@ -868,6 +866,7 @@ const formatTime = (dateStr: string) => {
                 filteredContacts.map((contact) => {
                   const badge = getAssignmentBadge(contact.assigned_to);
                   const hasUnread = (contact.unread_count || 0) > 0;
+                  const isSold = contact.vendaProdutoConcluida === true;
                   return (
                     <div
                       key={contact.id}
@@ -923,6 +922,20 @@ const formatTime = (dateStr: string) => {
                                   }}
                                 >
                                   {contact.unread_count}
+                                </span>
+                              )}
+                              {isSold && (
+                                <span
+                                  className="badge flex-shrink-0"
+                                  title="Vendido"
+                                  style={{
+                                    backgroundColor: '#22C55E',
+                                    color: 'white',
+                                    fontSize: '9px',
+                                    padding: '2px 6px',
+                                  }}
+                                >
+                                  Vendido
                                 </span>
                               )}
                               <span
