@@ -354,11 +354,16 @@ const fetchContacts = async (silent = false) => {
     if (!error && contactsData) {
       const contactIds = contactsData.map((c) => c.id);
 
-      const { data: allMessages } = await supabase
-        .from('messages')
-        .select('*')
-        .in('contact_id', contactIds)
-        .order('created_at', { ascending: false });
+      // Busca so a ultima mensagem de cada contato via funcao no banco
+      // (evita o limite de 1000 linhas do PostgREST que fazia contatos
+      // aparecerem como "Nenhuma mensagem" quando o total de mensagens
+      // do sistema passava de 1000 - hoje ja sao milhares).
+      const { data: lastMessages, error: lastMessagesError } = await supabase
+        .rpc('get_last_messages', { p_contact_ids: contactIds });
+
+      if (lastMessagesError) {
+        console.error('[WhatsApp] Erro ao buscar ultimas mensagens:', lastMessagesError);
+      }
 
       const { data: allAppointments } = await supabase
         .from('appointments')
@@ -367,8 +372,8 @@ const fetchContacts = async (silent = false) => {
         .order('created_at', { ascending: false });
 
       const lastMsgByContact = new Map<string, Message>();
-      (allMessages || []).forEach((m) => {
-        if (!lastMsgByContact.has(m.contact_id)) lastMsgByContact.set(m.contact_id, m as Message);
+      (lastMessages || []).forEach((m: Message) => {
+        lastMsgByContact.set(m.contact_id, m);
       });
 
       const lastAptByContact = new Map<string, { date: string; shift: string; status: string }>();
