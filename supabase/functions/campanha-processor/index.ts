@@ -16,6 +16,7 @@ interface BlocoMensagem {
 
 interface OpcaoAgendamento {
   data: string;
+  tipo?: 'visita_externa' | 'escritorio';
   turnos?: string[];  // Novo formato: ["Manha (8h as 12h)", "Tarde (13h as 17h)"]
   periodos?: { turno: string; horario: string }[];  // Formato antigo (compatibilidade)
   horarios?: string[];  // Atendimento no escritorio: ["09:30", "10:30", ...]
@@ -87,7 +88,7 @@ interface DadosVenda {
 /**
  * Renderiza opcoes de agendamento de forma literal
  */
-function renderizarOpcoesAgendamento(opcoes: OpcaoAgendamento[], tipoAtendimento: string = 'visita_externa'): string {
+function renderizarOpcoesAgendamento(opcoes: OpcaoAgendamento[], tipoAtendimentoCampanha: string = 'visita_externa'): string {
   if (!opcoes || opcoes.length === 0) return '';
 
   return opcoes.map((opcao, idx) => {
@@ -98,16 +99,21 @@ function renderizarOpcoesAgendamento(opcoes: OpcaoAgendamento[], tipoAtendimento
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
 
-    if (tipoAtendimento === 'escritorio') {
+    // Usa o tipo salvo na PROPRIA data (campanhas podem misturar visita
+    // externa e escritorio); campanhas antigas sem "tipo" salvo caem no
+    // tipo geral da campanha como fallback.
+    const tipoLinha = opcao.tipo || (tipoAtendimentoCampanha === 'escritorio' ? 'escritorio' : 'visita_externa');
+
+    if (tipoLinha === 'escritorio') {
       const horariosStr = (opcao.horarios || []).join(', ');
-      return `- Opcao ${idx + 1}: ${dataFormatada} — ${horariosStr}`;
+      return `- Opcao ${idx + 1}: ${dataFormatada} (atendimento no escritorio) — ${horariosStr}`;
     }
 
     // Usa turnos se existir, senao usa periodos (compatibilidade)
     const turnosStr = opcao.turnos?.join(', ') ||
       opcao.periodos?.map(p => `${p.turno} (${p.horario})`).join(' ') || '';
 
-    return `- Opcao ${idx + 1}: ${dataFormatada} — ${turnosStr}`;
+    return `- Opcao ${idx + 1}: ${dataFormatada} (visita externa) — ${turnosStr}`;
   }).join('\n');
 }
 

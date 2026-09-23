@@ -35,17 +35,23 @@ const TURNOS_HORARIOS: Record<string, string> = {
 };
 
 // Formata opcoes de agendamento [{data, turnos}] em texto legivel
-function formatarOpcoesAgendamento(opcoes: Array<{ data: string; turnos: string[] }>): string {
+function formatarOpcoesAgendamento(opcoes: Array<{ data: string; tipo?: string; turnos?: string[]; horarios?: string[] }>): string {
   if (!opcoes || opcoes.length === 0) return '';
   return opcoes
     .filter((o) => o.data)
     .map((o) => {
       const [ano, mes, dia] = o.data.split('-');
       const dataFormatada = `${dia}/${mes}/${ano}`;
+      // Cada data pode ser visita externa (com turnos) ou atendimento no
+      // escritorio (com horarios fixos) - campanhas podem misturar os dois.
+      if (o.tipo === 'escritorio' || (!o.tipo && o.horarios && o.horarios.length > 0)) {
+        const horariosTxt = (o.horarios || []).join(', ');
+        return `Dia ${dataFormatada} (atendimento no escritorio)\n${horariosTxt}`;
+      }
       const turnosTxt = (o.turnos || [])
         .map((t) => TURNOS_HORARIOS[t] || t)
         .join('\n');
-      return `Dia ${dataFormatada}\n${turnosTxt}`;
+      return `Dia ${dataFormatada} (visita externa)\n${turnosTxt}`;
     })
     .join('\n\n') + '\n\n';
 }
@@ -160,7 +166,7 @@ async function chamarGemini(
   },
   history: Array<{ role: string; parts: Array<{ text: string }> }> = [],
   baseConhecimento: Array<{ pergunta: string; resposta: string }> = [],
-  opcoesAgendamento: Array<{ data: string; turnos: string[] }> = []
+  opcoesAgendamento: Array<{ data: string; tipo?: string; turnos?: string[]; horarios?: string[] }> = []
 ): Promise<string> {
   const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
   console.log('[Gemini] Iniciando chamada - API Key presente:', !!geminiApiKey);
@@ -245,25 +251,6 @@ O marcador ###AGENDAMENTO_CONFIRMADO###...###FIM### e OBRIGATORIO e deve vir sem
 - Sempre que o formando fizer uma pergunta que nao seja sobre escolher data/turno ou confirmar endereco, consulte primeiro a BASE DE CONHECIMENTO fornecida antes de responder. Se a pergunta estiver coberta la, use a resposta de la (adaptando o tom se necessario). Se nao estiver coberta, diga que vai verificar e retornar, ou direcione para atendimento humano - nunca invente.
 - Seja simpatica e profissional`;
     }
-
-    // Injeta a data/hora REAIS (fuso de Brasilia) para a IA nunca
-    // "alucinar" uma data errada (ex: usar uma data do proprio treinamento
-    // dela em vez do dia real de hoje). Aplicado sempre, tanto no prompt
-    // personalizado da campanha quanto no prompt default.
-    const agora = new Date();
-    const dataHoraAtualBR = agora.toLocaleString('pt-BR', {
-      timeZone: 'America/Sao_Paulo',
-      weekday: 'long',
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-    systemPrompt +=
-      `\n\nDATA E HORA ATUAIS REAIS (fuso de Brasilia): ${dataHoraAtualBR}. ` +
-      'Use SEMPRE esta informacao como referencia para "hoje", "amanha", "essa semana", etc. ' +
-      'NUNCA use uma data do seu proprio conhecimento/treinamento - a informacao acima e a unica correta.';
 
     console.log('[Gemini] System Prompt (final):', systemPrompt.substring(0, 300) + '...');
     console.log('[Gemini] Mensagem do usuario:', textoUsuario);
@@ -787,6 +774,11 @@ async function executarFluxoCampanha(
   const tipoAtendimentoCampanha = campanha?.tipo_atendimento || 'todos';
   const baseConhecimento = (baseConhecimentoBruta || []).filter((item: any) => {
     const escopo = item.aplica_em || 'todos';
+    // Campanha "mista" (tem datas de visita externa e de escritorio juntas)
+    // usa conhecimento pensado pra qualquer um dos dois tipos.
+    if (tipoAtendimentoCampanha === 'mista') {
+      return escopo === 'todos' || escopo === 'visita_externa' || escopo === 'escritorio';
+    }
     return escopo === 'todos' || escopo === tipoAtendimentoCampanha;
   });
 

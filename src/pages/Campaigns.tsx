@@ -47,11 +47,11 @@ const ESCRITORIO_ENDERECO = 'Escritorio - Rua Judith Motta, Parque 10 de Novembr
 
 type TipoAtendimento = 'visita_externa' | 'escritorio' | 'venda_material';
 
-type OpcaoAgendamento = { data: string; turnos: string[]; horarios?: string[] };
+type OpcaoAgendamento = { data: string; tipo?: 'visita_externa' | 'escritorio'; turnos: string[]; horarios?: string[] };
 
 function formatarDatasDisponiveis(
   opcoes: OpcaoAgendamento[],
-  tipoAtendimento: TipoAtendimento = 'visita_externa'
+  tipoAtendimentoCampanha: TipoAtendimento = 'visita_externa'
 ): string {
   if (!opcoes || opcoes.length === 0) return '';
   return opcoes
@@ -59,14 +59,18 @@ function formatarDatasDisponiveis(
     .map((o) => {
       const [ano, mes, dia] = o.data.split('-');
       const dataFormatada = `${dia}/${mes}/${ano}`;
-      if (tipoAtendimento === 'escritorio') {
+      // Usa o tipo da PROPRIA data (campanhas podem misturar visita externa
+      // e escritorio); campanhas antigas sem "tipo" salvo usam o tipo geral
+      // da campanha como fallback.
+      const tipoLinha = o.tipo || (tipoAtendimentoCampanha === 'escritorio' ? 'escritorio' : 'visita_externa');
+      if (tipoLinha === 'escritorio') {
         const horariosTxt = (o.horarios || []).join(', ');
-        return `Dia ${dataFormatada} — ${horariosTxt}`;
+        return `Dia ${dataFormatada} — Atendimento no escritorio — ${horariosTxt}`;
       }
       const turnosTxt = (o.turnos || [])
         .map((t) => TURNOS_HORARIOS[t] || t)
         .join('\n');
-      return `Dia ${dataFormatada}\n${turnosTxt}`;
+      return `Dia ${dataFormatada} — Visita externa\n${turnosTxt}`;
     })
     .join('\n\n') + '\n\n';
 }
@@ -596,9 +600,20 @@ export function Campaigns() {
       .filter((o) => o.data)
       .map((o) => ({
         data: o.data,
+        tipo: o.tipo || 'visita_externa',
         turnos: o.turnos,
-        ...(tipoAtendimento === 'escritorio' ? { horarios: o.horarios || [] } : {}),
+        ...(o.tipo === 'escritorio' ? { horarios: o.horarios || [] } : {}),
       }));
+
+    // A campanha guarda um "tipo_atendimento" geral (usado pra filtrar base
+    // de conhecimento). Se as datas usadas forem todas do mesmo tipo,
+    // mantem esse tipo; se misturar visita externa e escritorio na mesma
+    // campanha, marca como "mista".
+    let tipoParaSalvar: string = tipoAtendimento;
+    if (tipoAtendimento !== 'venda_material') {
+      const tiposUsados = new Set(opcoesJson.map((o) => o.tipo));
+      tipoParaSalvar = tiposUsados.size > 1 ? 'mista' : (opcoesJson[0]?.tipo || tipoAtendimento);
+    }
 
     const result = await createCampanha(
       {
@@ -606,7 +621,7 @@ export function Campaigns() {
         descricao: formData.descricao.trim() || null,
         mensagem_inicial: formData.mensagem_inicial.trim(),
         prompt_ia: formData.prompt_ia.trim() || null,
-        tipo_atendimento: tipoAtendimento,
+        tipo_atendimento: tipoParaSalvar,
         opcoes_agendamento: opcoesJson.length > 0 ? opcoesJson : undefined,
       } as any,
       uploadedContacts
@@ -859,11 +874,16 @@ export function Campaigns() {
                   </div>
                 </div>
 
-                {/* Tipo de Atendimento */}
+                {/* Tipo de Atendimento (padrao usado ao adicionar uma nova data -
+                    cada data pode ter seu proprio tipo, veja abaixo) */}
                 <div className="space-y-3">
                   <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
                     Tipo de Atendimento
                   </h3>
+                  <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    Define o tipo padrao ao adicionar uma nova data. Voce pode misturar Visita Externa
+                    e Atendimento no Escritorio na mesma campanha, ajustando o tipo de cada data abaixo.
+                  </p>
                   <div className="flex items-center gap-4">
                     <label className="flex items-center gap-2 cursor-pointer">
                       <input
@@ -871,10 +891,7 @@ export function Campaigns() {
                         name="tipoAtendimento"
                         value="visita_externa"
                         checked={tipoAtendimento === 'visita_externa'}
-                        onChange={() => {
-                          setTipoAtendimento('visita_externa');
-                          setOpcoesAgendamento(opcoesAgendamento.map(o => ({ data: o.data, turnos: o.turnos })));
-                        }}
+                        onChange={() => setTipoAtendimento('visita_externa')}
                         className="w-4 h-4"
                       />
                       <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Visita Externa</span>
@@ -885,10 +902,7 @@ export function Campaigns() {
                         name="tipoAtendimento"
                         value="escritorio"
                         checked={tipoAtendimento === 'escritorio'}
-                        onChange={() => {
-                          setTipoAtendimento('escritorio');
-                          setOpcoesAgendamento(opcoesAgendamento.map(o => ({ data: o.data, turnos: [], horarios: [] })));
-                        }}
+                        onChange={() => setTipoAtendimento('escritorio')}
                         className="w-4 h-4"
                       />
                       <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Atendimento no Escritorio</span>
@@ -944,8 +958,8 @@ export function Campaigns() {
                         setOpcoesAgendamento([
                           ...opcoesAgendamento,
                           tipoAtendimento === 'escritorio'
-                            ? { data: '', turnos: [], horarios: [] }
-                            : { data: '', turnos: [] },
+                            ? { data: '', tipo: 'escritorio', turnos: [], horarios: [] }
+                            : { data: '', tipo: 'visita_externa', turnos: [] },
                         ])
                       }
                     >
@@ -960,13 +974,15 @@ export function Campaigns() {
                     </p>
                   ) : (
                     <div className="space-y-3">
-                      {opcoesAgendamento.map((opcao, idx) => (
+                      {opcoesAgendamento.map((opcao, idx) => {
+                        const tipoDaData: 'visita_externa' | 'escritorio' = opcao.tipo || 'visita_externa';
+                        return (
                         <div
                           key={idx}
                           className="flex flex-col gap-3 p-3 rounded-lg"
                           style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border)' }}
                         >
-                          <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-3 flex-wrap">
                             <span className="text-xs font-medium" style={{ color: 'var(--text-muted)', minWidth: '60px' }}>
                               Opcao {idx + 1}
                             </span>
@@ -981,6 +997,36 @@ export function Campaigns() {
                               className="input-dark"
                               style={{ minWidth: '140px' }}
                             />
+                            <div className="flex items-center gap-3 pl-2" style={{ borderLeft: '1px solid var(--border)' }}>
+                              <label className="flex items-center gap-1.5 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name={`tipoData-${idx}`}
+                                  checked={tipoDaData === 'visita_externa'}
+                                  onChange={() => {
+                                    const novas = [...opcoesAgendamento];
+                                    novas[idx] = { data: novas[idx].data, tipo: 'visita_externa', turnos: [] };
+                                    setOpcoesAgendamento(novas);
+                                  }}
+                                  className="w-3.5 h-3.5"
+                                />
+                                <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>Visita Externa</span>
+                              </label>
+                              <label className="flex items-center gap-1.5 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name={`tipoData-${idx}`}
+                                  checked={tipoDaData === 'escritorio'}
+                                  onChange={() => {
+                                    const novas = [...opcoesAgendamento];
+                                    novas[idx] = { data: novas[idx].data, tipo: 'escritorio', turnos: [], horarios: [] };
+                                    setOpcoesAgendamento(novas);
+                                  }}
+                                  className="w-3.5 h-3.5"
+                                />
+                                <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>Escritorio</span>
+                              </label>
+                            </div>
                             <button
                               type="button"
                               className="btn-icon ml-auto"
@@ -995,7 +1041,7 @@ export function Campaigns() {
                             </button>
                           </div>
 
-                          {tipoAtendimento === 'visita_externa' ? (
+                          {tipoDaData === 'visita_externa' ? (
                             <div className="flex items-center gap-4 pl-[72px]">
                               {['Manha (8h as 12h)', 'Tarde (13h as 17h)', 'Noite (18h as 20h)'].map(
                                 (turno) => (
@@ -1077,7 +1123,8 @@ export function Campaigns() {
                             </div>
                           )}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
