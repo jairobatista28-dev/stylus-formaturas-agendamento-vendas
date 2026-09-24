@@ -14,6 +14,8 @@ import {
   Trash2,
   CheckCircle2,
   Paperclip,
+  StickyNote,
+  Clock,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { sendMsg, sendMedia } from '../lib/uazapi';
@@ -22,7 +24,7 @@ import { ToastContainer } from '../components/Toast';
 import { WhatsAppConnection } from '../components/WhatsAppConnection';
 import type { Contact, Message, MessageTemplate, AppSettings } from '../types';
 
-type ContactFilter = 'todos' | 'ia' | 'manual' | 'aguarda' | 'vendas';
+type ContactFilter = 'todos' | 'ia' | 'manual' | 'aguarda' | 'vendas' | 'notas';
 
 interface ContactWithLastMsg extends Contact {
   lastMessage?: Message;
@@ -67,6 +69,18 @@ export function WhatsAppUnified() {
     notes: '',
   });
   const [savingSchedule, setSavingSchedule] = useState(false);
+
+  const [showNotaModal, setShowNotaModal] = useState(false);
+  const [notaInput, setNotaInput] = useState('');
+  const [savingNota, setSavingNota] = useState(false);
+
+  const [showAgendarMensagemModal, setShowAgendarMensagemModal] = useState(false);
+  const [agendarMensagemForm, setAgendarMensagemForm] = useState({
+    conteudo: '',
+    data: new Date().toISOString().split('T')[0],
+    hora: '09:00',
+  });
+  const [savingMensagemAgendada, setSavingMensagemAgendada] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -559,7 +573,8 @@ const fetchContacts = async (silent = false) => {
         (contactFilter === 'ia' && c.assigned_to === 'ia') ||
         (contactFilter === 'manual' && c.assigned_to === 'manual') ||
         (contactFilter === 'aguarda' && c.status === 'lead') ||
-        (contactFilter === 'vendas' && c.tipo_atendimento_campanha === 'venda_material');
+        (contactFilter === 'vendas' && c.tipo_atendimento_campanha === 'venda_material') ||
+        (contactFilter === 'notas' && !!c.observacao);
 
     const matchesSearch =
   !contactSearch || (c.name || '').toLowerCase().includes(contactSearch.toLowerCase());
@@ -732,6 +747,89 @@ fetchMessages(selectedContact.id);
     showToast('Marcado como Vendido!', 'success');
   };
 
+  const handleOpenNota = () => {
+    if (!selectedContact) return;
+    setNotaInput(selectedContact.observacao || '');
+    setShowNotaModal(true);
+  };
+
+  const handleSaveNota = async () => {
+    if (!selectedContact) return;
+    setSavingNota(true);
+
+    const novaNota = notaInput.trim() || null;
+
+    const { error } = await supabase
+      .from('contacts')
+      .update({ observacao: novaNota })
+      .eq('id', selectedContact.id);
+
+    if (error) {
+      showToast('Erro ao salvar observacao: ' + error.message, 'error');
+      setSavingNota(false);
+      return;
+    }
+
+    const updated = { ...selectedContact, observacao: novaNota };
+    setSelectedContact(updated);
+    setContacts((prev) =>
+      prev.map((c) => (c.id === selectedContact.id ? updated : c))
+    );
+    showToast('Observacao salva', 'success');
+    setSavingNota(false);
+    setShowNotaModal(false);
+  };
+
+  const handleOpenAgendarMensagem = () => {
+    setAgendarMensagemForm({
+      conteudo: '',
+      data: new Date().toISOString().split('T')[0],
+      hora: '09:00',
+    });
+    setShowAgendarMensagemModal(true);
+  };
+
+  const handleSalvarMensagemAgendada = async () => {
+    if (!selectedContact) return;
+
+    if (!agendarMensagemForm.conteudo.trim()) {
+      showToast('Escreva o conteudo da mensagem', 'error');
+      return;
+    }
+    if (!agendarMensagemForm.data || !agendarMensagemForm.hora) {
+      showToast('Informe a data e o horario do envio', 'error');
+      return;
+    }
+
+    const enviarEm = new Date(`${agendarMensagemForm.data}T${agendarMensagemForm.hora}:00`);
+    if (Number.isNaN(enviarEm.getTime())) {
+      showToast('Data/horario invalidos', 'error');
+      return;
+    }
+    if (enviarEm.getTime() <= Date.now()) {
+      showToast('Escolha uma data/horario no futuro', 'error');
+      return;
+    }
+
+    setSavingMensagemAgendada(true);
+
+    const { error } = await supabase.from('mensagens_agendadas').insert({
+      contact_id: selectedContact.id,
+      conteudo: agendarMensagemForm.conteudo.trim(),
+      enviar_em: enviarEm.toISOString(),
+    });
+
+    setSavingMensagemAgendada(false);
+
+    if (error) {
+      showToast('Erro ao agendar mensagem: ' + error.message, 'error');
+      return;
+    }
+
+    showToast('Mensagem programada com sucesso!', 'success');
+    setShowAgendarMensagemModal(false);
+  };
+
   const handleSaveSettings = async () => {
     const updates = [
       { key: 'min_delay_seconds', value: tempSettings.min_delay_seconds.toString() },
@@ -881,7 +979,7 @@ const formatTime = (dateStr: string) => {
           >
             <div className="p-3 space-y-2">
               <div className="flex gap-1 items-center">
-                {(['todos', 'ia', 'manual', 'aguarda', 'vendas'] as ContactFilter[]).map((f) => (
+                {(['todos', 'ia', 'manual', 'aguarda', 'vendas', 'notas'] as ContactFilter[]).map((f) => (
                   <button
                     key={f}
                     onClick={() => setContactFilter(f)}
@@ -1002,6 +1100,14 @@ const formatTime = (dateStr: string) => {
                                 >
                                   Vendido
                                 </span>
+                              )}
+                              {!!contact.observacao && (
+                                <StickyNote
+                                  size={13}
+                                  className="flex-shrink-0"
+                                  style={{ color: '#F59E0B' }}
+                                  title={contact.observacao}
+                                />
                               )}
                               <span
                                 className="badge flex-shrink-0"
@@ -1126,6 +1232,23 @@ const formatTime = (dateStr: string) => {
                         Vendido
                       </button>
                     )}
+                    <button
+                      onClick={handleOpenNota}
+                      className="btn-secondary"
+                      style={{ padding: '6px 10px', fontSize: '11px', backgroundColor: selectedContact.observacao ? 'rgba(245, 158, 11, 0.15)' : undefined }}
+                      title={selectedContact.observacao || 'Adicionar observacao'}
+                    >
+                      <StickyNote size={12} style={{ color: selectedContact.observacao ? '#F59E0B' : undefined }} />
+                      Observacao
+                    </button>
+                    <button
+                      onClick={handleOpenAgendarMensagem}
+                      className="btn-secondary"
+                      style={{ padding: '6px 10px', fontSize: '11px' }}
+                    >
+                      <Clock size={12} />
+                      Programar Mensagem
+                    </button>
                     <button
                       onClick={() => setShowScheduleModal(true)}
                       className="btn-primary"
@@ -1450,6 +1573,126 @@ const formatTime = (dateStr: string) => {
               >
                 {savingContact ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />}
                 {savingContact ? 'Salvando...' : 'Criar contato'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Observacao */}
+      {showNotaModal && selectedContact && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ backgroundColor: 'rgba(0,0,0,0.6)' }}
+          onClick={() => setShowNotaModal(false)}
+        >
+          <div
+            className="rounded-lg p-5 w-full max-w-md space-y-4"
+            style={{ backgroundColor: 'var(--bg-surface)', border: '1px solid var(--border)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                Observacao - {selectedContact.name}
+              </h3>
+              <button onClick={() => setShowNotaModal(false)} className="btn-icon">
+                <X size={16} />
+              </button>
+            </div>
+            <textarea
+              value={notaInput}
+              onChange={(e) => setNotaInput(e.target.value)}
+              placeholder="Ex: Vai pagar dia 30/09"
+              className="input-dark w-full"
+              rows={4}
+              style={{ resize: 'vertical' }}
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowNotaModal(false)}
+                className="btn-secondary flex-1"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSaveNota}
+                disabled={savingNota}
+                className="btn-primary flex-1"
+              >
+                {savingNota ? <Loader2 size={14} className="animate-spin" /> : <StickyNote size={14} />}
+                {savingNota ? 'Salvando...' : 'Salvar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Programar Mensagem */}
+      {showAgendarMensagemModal && selectedContact && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ backgroundColor: 'rgba(0,0,0,0.6)' }}
+          onClick={() => setShowAgendarMensagemModal(false)}
+        >
+          <div
+            className="rounded-lg p-5 w-full max-w-md space-y-4"
+            style={{ backgroundColor: 'var(--bg-surface)', border: '1px solid var(--border)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                Programar mensagem - {selectedContact.name}
+              </h3>
+              <button onClick={() => setShowAgendarMensagemModal(false)} className="btn-icon">
+                <X size={16} />
+              </button>
+            </div>
+            <textarea
+              value={agendarMensagemForm.conteudo}
+              onChange={(e) => setAgendarMensagemForm({ ...agendarMensagemForm, conteudo: e.target.value })}
+              placeholder="Mensagem que sera enviada automaticamente"
+              className="input-dark w-full"
+              rows={4}
+              style={{ resize: 'vertical' }}
+            />
+            <div className="flex gap-3">
+              <div className="flex-1">
+                <label className="text-xs" style={{ color: 'var(--text-muted)' }}>Data</label>
+                <input
+                  type="date"
+                  value={agendarMensagemForm.data}
+                  onChange={(e) => setAgendarMensagemForm({ ...agendarMensagemForm, data: e.target.value })}
+                  className="input-dark w-full"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="text-xs" style={{ color: 'var(--text-muted)' }}>Horario</label>
+                <input
+                  type="time"
+                  value={agendarMensagemForm.hora}
+                  onChange={(e) => setAgendarMensagemForm({ ...agendarMensagemForm, hora: e.target.value })}
+                  className="input-dark w-full"
+                />
+              </div>
+            </div>
+            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+              A mensagem e enviada automaticamente pelo sistema no horario escolhido (pode levar
+              ate alguns minutos apos o horario, dependendo da frequencia de verificacao).
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowAgendarMensagemModal(false)}
+                className="btn-secondary flex-1"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSalvarMensagemAgendada}
+                disabled={savingMensagemAgendada}
+                className="btn-primary flex-1"
+              >
+                {savingMensagemAgendada ? <Loader2 size={14} className="animate-spin" /> : <Clock size={14} />}
+                {savingMensagemAgendada ? 'Salvando...' : 'Programar envio'}
               </button>
             </div>
           </div>

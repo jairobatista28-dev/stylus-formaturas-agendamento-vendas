@@ -108,6 +108,7 @@ export interface Contact {
   assigned_to: string;
   created_at: string;
   unread_count?: number;
+  observacao?: string | null;
 }
 
 export interface Message {

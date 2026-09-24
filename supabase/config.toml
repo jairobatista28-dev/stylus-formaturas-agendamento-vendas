@@ -13,6 +13,9 @@ verify_jwt = false
 [functions.evolution-proxy]
 verify_jwt = false
 
+[functions.enviar-mensagens-agendadas]
+verify_jwt = false
+
 [functions.import-alunos]
 verify_jwt = true
 
