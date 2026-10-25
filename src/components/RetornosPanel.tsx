@@ -127,13 +127,18 @@ export function RetornosPanel({ onToast, atualizarChave }: { onToast: (msg: stri
     }
     setAnalisados(data.analisados || 0);
     setSugestoes(data.sugestoes || []);
+    // Promessa vencida: o campo comeca vazio para voce escolher uma nova data
     const iniciais: Record<string, string> = {};
-    (data.sugestoes || []).forEach((s: Sugestao) => (iniciais[s.contato_campanha_id] = s.data_sugerida));
+    (data.sugestoes || []).forEach((s: Sugestao) => (iniciais[s.contato_campanha_id] = s.data_passada ? '' : s.data_sugerida));
     setDatasEditadas(iniciais);
   }
 
   async function confirmarSugestao(s: Sugestao) {
-    const data = datasEditadas[s.contato_campanha_id] || s.data_sugerida;
+    const data = datasEditadas[s.contato_campanha_id];
+    if (!data) {
+      onToast('Escolha a data do retorno', 'error');
+      return;
+    }
     const r = await agendarRetornoManual(s.contato_campanha_id, data, 'ia_detectada', s.trecho);
     onToast(r.mensagem, r.ok ? 'success' : 'error');
     if (r.ok) {
@@ -188,9 +193,13 @@ export function RetornosPanel({ onToast, atualizarChave }: { onToast: (msg: stri
             Confira a data antes de confirmar. Ao confirmar, o retorno fica agendado sem enviar nada ao formando agora.
           </p>
           {sugestoes.map((s) => {
-            const data = datasEditadas[s.contato_campanha_id] || s.data_sugerida;
-            const acima = data > s.limite;
-            const excecao = !s.prazo_vigente || data > s.prazo_vigente;
+            const data = datasEditadas[s.contato_campanha_id] || '';
+            const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Manaus' }).format(new Date());
+            const vazia = !data;
+            const passada = !vazia && data < hoje;
+            const acima = !vazia && data > s.limite;
+            const bloqueado = vazia || passada || acima;
+            const excecao = !vazia && (!s.prazo_vigente || data > s.prazo_vigente);
             return (
               <div key={s.contato_campanha_id} className="rounded-lg p-3" style={{ border: '1px solid var(--border-subtle)' }}>
                 <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
@@ -199,15 +208,21 @@ export function RetornosPanel({ onToast, atualizarChave }: { onToast: (msg: stri
                     {s.trecho && (
                       <p className="text-xs italic" style={{ color: 'var(--text-secondary)' }}>“{s.trecho}”</p>
                     )}
-                    <p className="text-xs" style={{ color: acima ? 'var(--warning)' : 'var(--text-muted)' }}>
+                    {s.data_passada && (
+                      <p className="text-xs" style={{ color: 'var(--warning)' }}>
+                        Promessa vencida: tinha combinado {dataBR(s.data_sugerida)} e não comprou. Escolha uma nova data.
+                      </p>
+                    )}
+                    <p className="text-xs" style={{ color: bloqueado && !vazia ? 'var(--warning)' : 'var(--text-muted)' }}>
                       Prazo de guarda: {dataBR(s.prazo_vigente)} · limite máximo: {dataBR(s.limite)}
-                      {acima ? ' · data acima do limite' : excecao ? ' · precisa de exceção (será aprovada ao confirmar)' : ''}
+                      {acima ? ' · data acima do limite' : passada ? ' · essa data já passou' : excecao ? ' · precisa de exceção (será aprovada ao confirmar)' : ''}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
                     <input
                       type="date"
                       value={data}
+                      min={hoje}
                       max={s.limite}
                       onChange={(e) => setDatasEditadas({ ...datasEditadas, [s.contato_campanha_id]: e.target.value })}
                       className="input-dark"
@@ -215,9 +230,9 @@ export function RetornosPanel({ onToast, atualizarChave }: { onToast: (msg: stri
                     />
                     <button
                       onClick={() => confirmarSugestao(s)}
-                      disabled={acima}
+                      disabled={bloqueado}
                       className="btn-primary"
-                      style={{ padding: '6px 12px', fontSize: '12px', opacity: acima ? 0.5 : 1 }}
+                      style={{ padding: '6px 12px', fontSize: '12px', opacity: bloqueado ? 0.5 : 1 }}
                     >
                       Agendar
                     </button>
