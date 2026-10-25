@@ -65,6 +65,15 @@ export function FotosPanel({ onToast }: { onToast: (msg: string, tipo: 'success'
     const { data, error } = await supabase.functions.invoke('fotos-formando', { body: { acao: 'testar' } });
     setTestando(false);
     if (error || !data) {
+      // Mostra o detalhe do erro do servidor no painel (em vez de so um aviso generico)
+      let detalhe = error?.message || 'sem resposta';
+      try {
+        const corpo = await (error as any)?.context?.json?.();
+        if (corpo?.error) detalhe = corpo.error;
+      } catch {
+        /* ignora */
+      }
+      setResultadoTeste({ ok: false, total: 0, log: [`Erro no servidor: ${detalhe}`] });
       onToast('Erro ao testar conexão', 'error');
       return;
     }

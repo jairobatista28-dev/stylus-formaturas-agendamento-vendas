@@ -36,6 +36,14 @@ function json(body: unknown, status = 200) {
 // SESSAO (cookies) NO SITE
 // ============================================================================
 
+/** Esconde valores longos (tokens) e qualquer campo de senha antes de mostrar no log */
+function mascarar(texto: string): string {
+  return String(texto || '')
+    .replace(/\s+/g, ' ')
+    .replace(/("?(senha|password|pass)"?\s*[:=]\s*)"[^"]*"/gi, '$1"***"')
+    .replace(/[A-Za-z0-9+/=_-]{40,}/g, (m) => `${m.slice(0, 6)}...(${m.length})`);
+}
+
 class Sessao {
   cookies = new Map<string, string>();
   log: string[] = [];
@@ -104,7 +112,9 @@ class Sessao {
       body: JSON.stringify({ email, senha, brand_id: BRAND_ID }),
     });
     const corpo = await r3.text();
-    this.log.push(`ValidarLogin -> ${r3.status} | cookies: ${[...this.cookies.keys()].join(', ') || 'nenhum'} | resposta: ${corpo.replace(/\s+/g, ' ').slice(0, 120)}`);
+    this.log.push(`ValidarLogin -> ${r3.status} | cookies: ${[...this.cookies.keys()].join(', ') || 'nenhum'}`);
+    this.log.push(`ValidarLogin resposta: ${mascarar(corpo).slice(0, 300)}`);
+    this.log.push(`ValidarLogin cabecalhos: ${[...r3.headers.keys()].join(', ')}`);
     return r3.ok;
   }
 }
@@ -142,11 +152,22 @@ async function listarAlunos(sb: any, sessao: Sessao, forcar = false): Promise<Al
   });
   const texto = await res.text();
   sessao.log.push(`ListIncremental -> ${res.status} (${Math.round(texto.length / 1024)} kB)`);
-  let lista: any[] = [];
+  let bruto: any = null;
   try {
-    lista = JSON.parse(texto);
+    bruto = JSON.parse(texto);
   } catch {
-    sessao.log.push(`ListIncremental nao retornou JSON: ${texto.replace(/\s+/g, ' ').slice(0, 120)}`);
+    sessao.log.push(`ListIncremental nao retornou JSON: ${mascarar(texto).slice(0, 300)}`);
+    return [];
+  }
+  // A lista pode vir direto (array) ou dentro de um objeto ({ data: [...] })
+  let lista: any[] = [];
+  if (Array.isArray(bruto)) lista = bruto;
+  else if (bruto && typeof bruto === 'object') {
+    const chave = Object.keys(bruto).find((k) => Array.isArray(bruto[k]));
+    if (chave) lista = bruto[chave];
+  }
+  if (!lista.length) {
+    sessao.log.push(`ListIncremental sem lista de alunos. Resposta: ${mascarar(texto).slice(0, 300)}`);
     return [];
   }
   const enxuta: AlunoMA[] = lista.map((a: any) => ({
