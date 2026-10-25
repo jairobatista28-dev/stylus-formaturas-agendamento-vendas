@@ -64,6 +64,8 @@ class Sessao {
   cookies = new Map<string, string>();
   log: string[] = [];
   authToken: string | null = null;
+  ultimaUrl = '';
+  rastrearRedirecionamentos = false;
 
   guardarCookies(res: Response) {
     // deno-lint-ignore no-explicit-any
@@ -95,10 +97,15 @@ class Sessao {
       const res = await fetch(atual, { ...opcoes, headers, redirect: 'manual' });
       this.guardarCookies(res);
       if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
-        atual = new URL(res.headers.get('location')!, atual).toString();
+        const destino = new URL(res.headers.get('location')!, atual).toString();
+        if (this.rastrearRedirecionamentos) {
+          this.log.push(`  ${res.status}: ${new URL(atual).pathname}${new URL(atual).search} -> ${new URL(destino).pathname}${new URL(destino).search}`);
+        }
+        atual = destino;
         opcoes = { method: 'GET' };
         continue;
       }
+      this.ultimaUrl = atual;
       return res;
     }
     throw new Error('Redirecionamentos demais');
@@ -282,9 +289,18 @@ function encontrarAluno(alunos: AlunoMA[], nome: string, contrato: string | null
 
 /** Le a pagina de fotos do aluno e extrai oPhotos, token e urlRender */
 async function carregarFotos(sessao: Sessao, aluno: AlunoMA): Promise<{ fotos: FotoMA[]; token: string; urlRender: string }> {
+  sessao.rastrearRedirecionamentos = true;
   const res = await sessao.req(`/Produtos?a=${encodeURIComponent(aluno.AlunoTurmaID_Cript)}&fotos=true`);
+  sessao.rastrearRedirecionamentos = false;
   const html = await res.text();
-  sessao.log.push(`Pagina de fotos -> ${res.status} (${Math.round(html.length / 1024)} kB)`);
+  const titulo = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim() || '(sem titulo)';
+  let final = sessao.ultimaUrl;
+  try { const u = new URL(final); final = u.pathname + u.search; } catch { /* mantem */ }
+  sessao.log.push(`Pagina de fotos -> ${res.status} (${Math.round(html.length / 1024)} kB) | pagina final: ${final} | titulo: ${titulo} | tem oPhotos: ${html.includes('oPhotos') ? 'sim' : 'nao'}`);
+  if (!html.includes('oPhotos')) {
+    const texto = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ');
+    sessao.log.push(`Conteudo recebido: ${mascarar(texto).slice(0, 250)}`);
+  }
 
   const token = html.match(/var\s+token\s*=\s*"([^"]+)"/)?.[1] || '';
   const urlRender = html.match(/var\s+urlRender\s*=\s*"([^"]+)"/)?.[1] || `${BASE}/ImageFormatura`;
