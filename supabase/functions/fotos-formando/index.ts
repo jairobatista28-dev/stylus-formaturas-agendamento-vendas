@@ -145,39 +145,19 @@ class Sessao {
     this.log.push(`ValidarLogin cabecalhos: ${[...r3.headers.keys()].join(', ')}`);
     if (!r3.ok) return false;
 
-    // O site guarda um token da conta que a API exige no cabecalho "Authtoken".
-    // 1) procura na resposta do login e nos cookies
-    this.authToken = extrairToken(corpo);
-    let origem = this.authToken ? 'resposta do login' : '';
-    if (!this.authToken) {
-      for (const [nome, valor] of this.cookies) {
-        const tk = extrairToken(decodeURIComponent(valor));
-        if (tk) { this.authToken = tk; origem = `cookie ${nome}`; break; }
-      }
-    }
-    // 2) procura nas paginas internas (Painel, Alunos)
-    for (const pagina of ['/Painel', '/Alunos']) {
-      if (this.authToken) break;
-      const rp = await this.req(pagina);
-      const html = await rp.text();
-      const tk = extrairToken(html);
-      this.log.push(`GET ${pagina} -> ${rp.status} (${Math.round(html.length / 1024)} kB)${tk ? ' | token encontrado' : ''}`);
-      if (tk) { this.authToken = tk; origem = `pagina ${pagina}`; break; }
-      for (const [nome, valor] of this.cookies) {
-        const tc = extrairToken(decodeURIComponent(valor));
-        if (tc) { this.authToken = tc; origem = `cookie ${nome}`; break; }
-      }
-    }
-    // 3) Cookie "user_offline" (criado pelo navegador depois do login e exigido
-    //    pelas paginas do site, como a de fotos). Vem do secret MEUSALBUNS_USER_OFFLINE.
+    // IMPORTANTE: o cookie "user_offline" precisa entrar LOGO apos o login, antes de
+    // qualquer visita a paginas do site. Sem ele, a primeira pagina visitada encerra a
+    // sessao e tudo passa a redirecionar para o Login.
+    let origem = '';
     const userOffline = Deno.env.get('MEUSALBUNS_USER_OFFLINE')?.trim();
     if (userOffline) {
       this.cookies.set('user_offline', userOffline);
       if (!this.cookies.has('TokenF')) this.cookies.set('TokenF', '');
+      this.cookies.set('UrlOriginalString', encodeURIComponent(`${BASE}/Login/`));
       try {
         const dados = JSON.parse(userOffline);
-        if (!this.authToken && dados?.Token) { this.authToken = String(dados.Token); origem = 'secret MEUSALBUNS_USER_OFFLINE'; }
-        this.log.push(`Cookie user_offline: configurado (conta ${dados?.Nickname || dados?.Name || '?'})`);
+        if (dados?.Token) { this.authToken = String(dados.Token); origem = 'secret MEUSALBUNS_USER_OFFLINE'; }
+        this.log.push(`Cookie user_offline: configurado logo apos o login (conta ${dados?.Nickname || dados?.Name || '?'})`);
       } catch {
         this.log.push('Cookie user_offline: configurado, mas o valor nao e um JSON valido (confira o secret)');
       }
@@ -185,7 +165,11 @@ class Sessao {
       this.log.push('Cookie user_offline: NAO configurado (crie o secret MEUSALBUNS_USER_OFFLINE)');
     }
 
-    // 4) plano B do token: secret opcional
+    // Token da API: do cookie acima, da resposta do login ou do secret MEUSALBUNS_TOKEN
+    if (!this.authToken) {
+      const tk = extrairToken(corpo);
+      if (tk) { this.authToken = tk; origem = 'resposta do login'; }
+    }
     if (!this.authToken) {
       const secreto = Deno.env.get('MEUSALBUNS_TOKEN')?.trim();
       if (secreto) { this.authToken = secreto; origem = 'secret MEUSALBUNS_TOKEN'; }
