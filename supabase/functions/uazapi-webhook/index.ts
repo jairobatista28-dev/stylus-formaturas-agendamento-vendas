@@ -1211,7 +1211,7 @@ serve(async (req) => {
       .select('id, campanha_id, status, dados_confirmados_em, campanhas!inner(tipo_atendimento)')
       .eq('telefone', telefoneNormalizado)
       .eq('campanhas.tipo_atendimento', 'venda_material')
-      .in('status', ['enviando', 'saudacao_enviada', 'sem_retorno', 'em_conversa', 'confirmando_dados', 'interessado_compra', 'comprou'])
+      .in('status', ['enviando', 'saudacao_enviada', 'sem_retorno', 'em_conversa', 'confirmando_dados', 'compra_futura', 'interessado_compra', 'comprou'])
       .order('atualizado_em', { ascending: false })
       .limit(1)
       .maybeSingle();

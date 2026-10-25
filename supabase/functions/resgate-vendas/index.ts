@@ -11,6 +11,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
  *    formando continua elegivel (nao comprou, nao respondeu, nao foi assumido).
  *  - simular (tela de Vendas Pendentes): lista candidatos e previa das mensagens,
  *    sem enviar nada.
+ *
+ * RETORNO PROGRAMADO (formando que prometeu comprar em outra data):
+ *  - agendar_retorno: registra a data (chamado pela IA de vendas ou pelo painel),
+ *    validando o limite (prazo de reciclagem + dias de prorrogacao) e marcando
+ *    excecao quando a data passa do prazo de guarda.
+ *  - detectar_promessas: a IA le as conversas recentes e sugere datas prometidas
+ *    (inclusive de conversas em atendimento manual) para voce confirmar.
+ *  - executar: alem do resgate, envia os retornos do dia.
  */
 
 const corsHeaders = {
@@ -35,6 +43,7 @@ interface Config {
   hora_fim: number;
   dias_semana: number[];
   fuso: string;
+  retornos_ativos?: boolean;
 }
 
 interface Candidato {
@@ -82,6 +91,18 @@ function horarioLocalParaUTC(fuso: string, hora: number, minuto: number): Date {
   const p = partesNoFuso(fuso);
   const off = offsetMinutos(fuso);
   return new Date(Date.UTC(p.ano, p.mes - 1, p.dia, hora, minuto) - off * 60000);
+}
+
+/** Converte "data YYYY-MM-DD as HH:MM no fuso" para Date (UTC) */
+function dataHoraLocalParaUTC(fuso: string, dataYMD: string, hora: number, minuto: number): Date {
+  const [a, m, d] = dataYMD.split('-').map(Number);
+  const off = offsetMinutos(fuso);
+  return new Date(Date.UTC(a, m - 1, d, hora, minuto) - off * 60000);
+}
+
+function hojeUTC(fuso: string): Date {
+  const p = partesNoFuso(fuso);
+  return new Date(Date.UTC(p.ano, p.mes - 1, p.dia));
 }
 
 /**
@@ -455,6 +476,332 @@ async function enviarPendentes(sb: any, cfg: Config): Promise<number> {
 }
 
 // ============================================================================
+// RETORNO PROGRAMADO
+// ============================================================================
+
+const NUMERO_VENDEDOR = '5592993809136';
+
+/**
+ * Prazo vigente e limite maximo para a compra de um contato:
+ *  - prazoVigente: ate quando o material esta garantido hoje (prorrogado, se houver)
+ *  - limite: prazo original + dias de prorrogacao (ou o prorrogado, se for maior)
+ */
+function calcularLimites(prazoReciclagem: string | null, prazoProrrogado: string | null, cfg: Config) {
+  const original = parsePrazo(prazoReciclagem);
+  const prorrogado = prazoProrrogado ? new Date(`${prazoProrrogado}T00:00:00Z`) : null;
+  const prazoVigente = prorrogado || original;
+  let limite: Date;
+  if (original) {
+    limite = adicionarDias(original, cfg.dias_prorrogacao);
+    if (prorrogado && prorrogado > limite) limite = prorrogado;
+  } else {
+    limite = prorrogado || adicionarDias(hojeUTC(cfg.fuso), cfg.dias_prorrogacao);
+  }
+  return { prazoVigente, limite };
+}
+
+function horarioDoRetorno(dataYMD: string, cfg: Config): Date {
+  // Sorteia um horario dentro da janela (1h depois do inicio ate 2h antes do fim)
+  const ini = (cfg.hora_inicio + 1) * 60;
+  const fim = Math.max(ini + 30, (cfg.hora_fim - 2) * 60);
+  const minutos = ini + Math.floor(Math.random() * (fim - ini));
+  let quando = dataHoraLocalParaUTC(cfg.fuso, dataYMD, Math.floor(minutos / 60), minutos % 60);
+  // Retorno para hoje com horario que ja passou: daqui a 15-45 min
+  if (quando.getTime() < Date.now()) quando = new Date(Date.now() + (15 + Math.random() * 30) * 60000);
+  return quando;
+}
+
+interface ResultadoAgendamento {
+  ok: boolean;
+  motivo?: 'data_invalida' | 'data_passada' | 'acima_do_limite' | 'contato_nao_encontrado' | 'vendido' | 'erro';
+  data?: string;
+  limite?: string;
+  prazo_vigente?: string | null;
+  excecao?: boolean;
+  retorno_id?: string;
+}
+
+async function agendarRetorno(
+  sb: any,
+  cfg: Config,
+  args: { contato_campanha_id: string; data: string; origem?: 'ia' | 'manual' | 'ia_detectada'; trecho?: string | null }
+): Promise<ResultadoAgendamento> {
+  const origem = args.origem || 'manual';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(args.data || ''))) return { ok: false, motivo: 'data_invalida' };
+
+  const { data: cc } = await sb
+    .from('contatos_campanha')
+    .select('id, campanha_id, nome, telefone, status, numero_contrato, prazo_reciclagem, prazo_prorrogado')
+    .eq('id', args.contato_campanha_id)
+    .maybeSingle();
+  if (!cc) return { ok: false, motivo: 'contato_nao_encontrado' };
+  if (cc.status === 'comprou') return { ok: false, motivo: 'vendido' };
+
+  const data = new Date(`${args.data}T00:00:00Z`);
+  const hoje = hojeUTC(cfg.fuso);
+  const { prazoVigente, limite } = calcularLimites(cc.prazo_reciclagem, cc.prazo_prorrogado, cfg);
+  const base = { data: args.data, limite: dataISO(limite), prazo_vigente: prazoVigente ? dataISO(prazoVigente) : null };
+
+  if (data < hoje) return { ok: false, motivo: 'data_passada', ...base };
+  if (data > limite) return { ok: false, motivo: 'acima_do_limite', ...base };
+
+  const excecao = !prazoVigente || data > prazoVigente;
+  const excecaoStatus = !excecao ? 'nao_aplica' : origem === 'manual' ? 'aprovada' : 'solicitada';
+
+  // Um retorno ativo por contato: substitui o anterior
+  await sb
+    .from('retornos_agendados')
+    .update({ status: 'cancelado', motivo: 'substituido_por_nova_data' })
+    .eq('contato_campanha_id', cc.id)
+    .eq('status', 'agendado');
+
+  const { data: novo, error } = await sb
+    .from('retornos_agendados')
+    .insert({
+      contato_campanha_id: cc.id,
+      campanha_id: cc.campanha_id,
+      nome: cc.nome,
+      telefone: cc.telefone,
+      data_retorno: args.data,
+      agendado_para: horarioDoRetorno(args.data, cfg).toISOString(),
+      prazo_limite: dataISO(limite),
+      excecao,
+      excecao_status: excecaoStatus,
+      origem,
+      trecho: args.trecho || null,
+      status: 'agendado',
+    })
+    .select('id')
+    .single();
+  if (error) {
+    console.error('[Retorno] Erro ao agendar:', error);
+    return { ok: false, motivo: 'erro', ...base };
+  }
+
+  const atualiza: Record<string, unknown> = { status: 'compra_futura' };
+  // Com excecao, o material fica guardado ate o limite (a IA passa a usar essa data)
+  if (excecao) atualiza.prazo_prorrogado = dataISO(limite);
+  await sb.from('contatos_campanha').update(atualiza).eq('id', cc.id);
+
+  if (excecao && origem !== 'manual') {
+    const aviso =
+      `⚠️ *Pedido de excecao de prazo*\n\n` +
+      `👤 *Nome:* ${cc.nome}\n` +
+      `📄 *Contrato:* ${cc.numero_contrato || 'Nao informado'}\n` +
+      `📅 *Quer comprar em:* ${dataBR(data)}/${data.getUTCFullYear()}\n` +
+      `⏳ *Prazo de guarda atual:* ${prazoVigente ? dataBR(prazoVigente) + '/' + prazoVigente.getUTCFullYear() : 'nao informado'}\n` +
+      `🛑 *Limite maximo:* ${dataBR(limite)}/${limite.getUTCFullYear()}\n\n` +
+      `A IA informou que vai pedir autorizacao da supervisao. Sem recusa, a excecao vale como aprovada ` +
+      `e a IA chama o formando na data. Para recusar: Vendas Pendentes > Retornos programados.`;
+    await enviarTexto(NUMERO_VENDEDOR, aviso);
+  }
+
+  console.log(`[Retorno] ${cc.nome}: retorno em ${args.data} (origem ${origem}${excecao ? ', excecao' : ''})`);
+  return { ok: true, ...base, excecao, retorno_id: novo?.id };
+}
+
+function montarMensagemRetorno(variante: number, r: any, cc: any, fuso: string): string {
+  const pn = primeiroNome(cc.nome);
+  const nome = pn ? `, ${pn}` : '';
+  const sd = saudacao(fuso);
+  const fotos = textoFotos(cc.quantidade_fotos);
+  const limite = r.prazo_limite ? new Date(`${r.prazo_limite}T00:00:00Z`) : null;
+  const linhaExcecao = r.excecao && limite
+    ? `\n\nBoa notícia: a supervisão autorizou a exceção e o seu material está reservado até ${dataBR(limite)}.`
+    : '';
+  if (variante % 2 === 0) {
+    return `${sd}${nome}! Tudo bem? Como combinamos, estou passando hoje para retomarmos a aquisição das ${fotos.replace('as suas ', 'suas ')} da formatura.${linhaExcecao}\n\nPosso te passar as opções de pagamento?`;
+  }
+  return `${sd}${nome}! Aqui é a Sophia, da Stylus Formaturas. Hoje é o dia que você tinha combinado comigo para garantir ${fotos} da formatura 📸${linhaExcecao}\n\nQuer que eu te mande as condições para finalizarmos?`;
+}
+
+async function enviarRetornos(sb: any, cfg: Config): Promise<number> {
+  const { data: vencidos } = await sb
+    .from('retornos_agendados')
+    .select('*')
+    .eq('status', 'agendado')
+    .lte('agendado_para', new Date().toISOString())
+    .order('agendado_para', { ascending: true })
+    .limit(3);
+
+  let enviados = 0;
+  for (const r of vencidos || []) {
+    if (r.excecao && r.excecao_status === 'recusada') {
+      await sb.from('retornos_agendados').update({ status: 'cancelado', motivo: 'excecao_recusada' }).eq('id', r.id);
+      continue;
+    }
+    const { data: cc } = await sb
+      .from('contatos_campanha')
+      .select('id, campanha_id, nome, telefone, status, quantidade_fotos')
+      .eq('id', r.contato_campanha_id)
+      .maybeSingle();
+    if (!cc) {
+      await sb.from('retornos_agendados').update({ status: 'cancelado', motivo: 'contato_removido' }).eq('id', r.id);
+      continue;
+    }
+    const { data: comprou } = await sb.from('contatos_campanha').select('id').eq('telefone', r.telefone).eq('status', 'comprou').limit(1);
+    if (cc.status === 'comprou' || (comprou && comprou.length > 0)) {
+      await sb.from('retornos_agendados').update({ status: 'cancelado', motivo: 'vendido' }).eq('id', r.id);
+      continue;
+    }
+    if (['sem_interesse', 'interessado_compra', 'confirmando_dados'].includes(cc.status)) {
+      await sb.from('retornos_agendados').update({ status: 'cancelado', motivo: `status_${cc.status}` }).eq('id', r.id);
+      continue;
+    }
+
+    const texto = montarMensagemRetorno(Math.floor(Math.random() * 2), r, cc, cfg.fuso);
+    const res = await enviarTexto(r.telefone, texto);
+    await sb.from('envio_log').insert({ campanha_id: r.campanha_id, contato_telefone: r.telefone, sucesso: res.ok });
+    if (!res.ok) {
+      await sb.from('retornos_agendados').update({ status: 'erro', motivo: res.erro, mensagem: texto }).eq('id', r.id);
+      continue;
+    }
+
+    const agoraISO = new Date().toISOString();
+    await sb.from('retornos_agendados').update({
+      status: 'enviado',
+      enviado_em: agoraISO,
+      mensagem: texto,
+      ...(r.excecao && r.excecao_status === 'solicitada' ? { excecao_status: 'aprovada' } : {}),
+    }).eq('id', r.id);
+    await sb.from('contatos_campanha').update({
+      status: 'em_conversa',
+      resgate_enviado_em: agoraISO, // evita que o mesmo formando receba tambem o resgate
+    }).eq('id', cc.id);
+
+    // Registra no chat e devolve a conversa para a IA de vendas
+    let { data: contato } = await sb.from('contacts').select('id').eq('phone', r.telefone).maybeSingle();
+    if (!contato) {
+      const { data: novo } = await sb
+        .from('contacts')
+        .insert({ phone: r.telefone, name: r.nome || r.telefone, status: 'lead', assigned_to: 'ia' })
+        .select('id')
+        .single();
+      contato = novo;
+    }
+    if (contato?.id) {
+      await sb.from('messages').insert({ contact_id: contato.id, direction: 'out', content: texto, sent_by: 'ia', seq: 0 });
+      await sb.from('contacts').update({ assigned_to: 'ia' }).eq('id', contato.id);
+    }
+    await sb.from('conversa_estado').upsert({
+      campanha_id: r.campanha_id,
+      contato_telefone: r.telefone,
+      contato_nome: r.nome,
+      bloco_atual: 9999,
+      aguardando_resposta: true,
+      status: 'aguardando_lead',
+      updated_at: agoraISO,
+    }, { onConflict: 'campanha_id,contato_telefone' });
+
+    enviados++;
+    console.log(`[Retorno] Enviado para ${r.nome}`);
+  }
+  return enviados;
+}
+
+/** Pede ao Gemini para identificar, na conversa, uma promessa de compra em data futura */
+async function analisarConversa(textoConversa: string, hojeBR: string, ano: number): Promise<{ promessa: boolean; data: string | null; trecho: string | null }> {
+  const chave = Deno.env.get('GEMINI_API_KEY');
+  if (!chave) return { promessa: false, data: null, trecho: null };
+  const prompt =
+    `Hoje e ${hojeBR} (ano ${ano}). Abaixo esta uma conversa de WhatsApp entre a empresa (EMPRESA) e um formando (FORMANDO) ` +
+    `sobre a compra das fotos da formatura.\n\n` +
+    `Identifique se o FORMANDO disse que vai comprar/pagar/adquirir em uma data futura especifica (ex: "dia 05", "dia 10/11", ` +
+    `"quando receber dia 5", "mes que vem dia 15", "sexta"). Converta para YYYY-MM-DD considerando a data de hoje: se o ` +
+    `formando disse so o dia, use a proxima ocorrencia desse dia; se disse dia/mes que ja passou neste ano e a conversa e ` +
+    `recente, provavelmente quis dizer o proximo mes - nesse caso use o proximo mes. Se ele nao indicou data, promessa=false.\n\n` +
+    `Responda SOMENTE com JSON: {"promessa": true|false, "data": "YYYY-MM-DD" ou null, "trecho": "frase exata do formando" ou null}\n\n` +
+    `CONVERSA:\n${textoConversa}`;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${chave}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+        }),
+      }
+    );
+    if (!res.ok) return { promessa: false, data: null, trecho: null };
+    const j = await res.json();
+    const texto = j?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const out = JSON.parse(texto.replace(/```json|```/g, '').trim());
+    const dataOk = typeof out.data === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(out.data);
+    return { promessa: !!out.promessa && dataOk, data: dataOk ? out.data : null, trecho: out.trecho || null };
+  } catch (e) {
+    console.warn('[Retorno] Falha ao analisar conversa:', e);
+    return { promessa: false, data: null, trecho: null };
+  }
+}
+
+async function detectarPromessas(sb: any, cfg: Config) {
+  // Contatos de venda que nao compraram e nao tem retorno ativo, com conversa nos ultimos 45 dias
+  const { data: contatos } = await sb
+    .from('contatos_campanha')
+    .select('id, nome, telefone, status, numero_contrato, prazo_reciclagem, prazo_prorrogado, campanhas!inner(tipo_atendimento)')
+    .eq('campanhas.tipo_atendimento', 'venda_material')
+    .in('status', ['em_conversa', 'interessado_compra', 'confirmando_dados', 'transferido_humano', 'saudacao_enviada', 'sem_retorno']);
+
+  const { data: ativos } = await sb.from('retornos_agendados').select('contato_campanha_id').eq('status', 'agendado');
+  const comRetorno = new Set((ativos || []).map((a: any) => a.contato_campanha_id));
+  const { data: vendidos } = await sb.from('contatos_campanha').select('telefone').eq('status', 'comprou');
+  const telVendidos = new Set((vendidos || []).map((v: any) => v.telefone));
+
+  const lista = (contatos || []).filter((c: any) => !comRetorno.has(c.id) && !telVendidos.has(c.telefone));
+  const limite45 = new Date(Date.now() - 45 * 86400000).toISOString();
+  const p = partesNoFuso(cfg.fuso);
+  const hojeBR = `${String(p.dia).padStart(2, '0')}/${String(p.mes).padStart(2, '0')}/${p.ano}`;
+
+  // Monta as conversas (so de quem escreveu algo recentemente)
+  const fila: Array<{ c: any; conversa: string }> = [];
+  for (const c of lista) {
+    if (fila.length >= 40) break;
+    const { data: contato } = await sb.from('contacts').select('id').eq('phone', c.telefone).maybeSingle();
+    if (!contato) continue;
+    const { data: msgs } = await sb
+      .from('messages')
+      .select('direction, content, created_at')
+      .eq('contact_id', contato.id)
+      .gte('created_at', limite45)
+      .order('created_at', { ascending: false })
+      .limit(25);
+    if (!msgs || !msgs.some((m: any) => m.direction === 'in')) continue;
+    const conversa = msgs.slice().reverse()
+      .map((m: any) => `[${new Date(m.created_at).toLocaleDateString('pt-BR', { timeZone: cfg.fuso })}] ${m.direction === 'in' ? 'FORMANDO' : 'EMPRESA'}: ${String(m.content || '').slice(0, 400)}`)
+      .join('\n');
+    fila.push({ c, conversa });
+  }
+
+  const sugestoes: any[] = [];
+  for (let i = 0; i < fila.length; i += 5) {
+    const lote = fila.slice(i, i + 5);
+    const resultados = await Promise.all(lote.map((f) => analisarConversa(f.conversa, hojeBR, p.ano)));
+    resultados.forEach((r, k) => {
+      if (!r.promessa || !r.data) return;
+      const c = lote[k].c;
+      const { prazoVigente, limite } = calcularLimites(c.prazo_reciclagem, c.prazo_prorrogado, cfg);
+      const data = new Date(`${r.data}T00:00:00Z`);
+      sugestoes.push({
+        contato_campanha_id: c.id,
+        nome: c.nome,
+        telefone: c.telefone,
+        status: c.status,
+        data_sugerida: r.data,
+        trecho: r.trecho,
+        prazo_vigente: prazoVigente ? dataISO(prazoVigente) : null,
+        limite: dataISO(limite),
+        excecao: !prazoVigente || data > prazoVigente,
+        acima_do_limite: data > limite,
+        data_passada: data < hojeUTC(cfg.fuso),
+      });
+    });
+  }
+  return { analisados: fila.length, sugestoes };
+}
+
+// ============================================================================
 // HANDLER
 // ============================================================================
 
@@ -493,11 +840,28 @@ serve(async (req) => {
       return json({ success: true, total: lista.length, elegiveis: lista.filter((l) => l.elegivel).length, candidatos: lista });
     }
 
+    if (acao === 'agendar_retorno') {
+      const r = await agendarRetorno(sb, cfg, {
+        contato_campanha_id: body.contato_campanha_id,
+        data: body.data,
+        origem: body.origem,
+        trecho: body.trecho,
+      });
+      return json({ success: r.ok, ...r });
+    }
+
+    if (acao === 'detectar_promessas') {
+      const r = await detectarPromessas(sb, cfg);
+      return json({ success: true, ...r });
+    }
+
     if (acao === 'executar') {
-      if (!cfg.ativo) return json({ success: true, ativo: false });
+      // Retornos combinados com o formando rodam mesmo com o resgate pausado
+      const retornos = cfg.retornos_ativos === false ? 0 : await enviarRetornos(sb, cfg);
+      if (!cfg.ativo) return json({ success: true, ativo: false, retornos });
       const agendados = await planejarDia(sb, cfg);
       const enviados = await enviarPendentes(sb, cfg);
-      return json({ success: true, agendados, enviados });
+      return json({ success: true, agendados, enviados, retornos });
     }
 
     return json({ error: 'Acao desconhecida' }, 400);

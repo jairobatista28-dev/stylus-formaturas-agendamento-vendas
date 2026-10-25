@@ -824,6 +824,16 @@ antes de gerar o marcador - nunca gere ###QUER_COMPRAR### com as duas opcoes mis
 Se o formando demonstrar que nao tem interesse, inclua: ###SEM_INTERESSE###
 Se precisar transferir para atendimento humano, inclua: ###OVERFLOW###
 
+## FORMANDO QUE VAI COMPRAR EM OUTRA DATA
+Se o formando disser que quer comprar, mas so mais pra frente (ex: "so consigo dia 10", "quando
+receber o salario", "mes que vem"), pergunte para qual DATA (dia e mes) voce pode programar o
+retorno. Quando ele informar uma data concreta, inclua ao final da resposta o marcador:
+###COMPRA_FUTURA###{"data":"YYYY-MM-DD"}###FIM###
+Regras: use o ano correto considerando a data de hoje (${new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Manaus' })}).
+Se a data que ele falou ja passou, pergunte se ele quis dizer o proximo mes ANTES de gerar o marcador.
+Nao invente data: sem data concreta, nao gere o marcador. Voce nao precisa escrever a confirmacao:
+o sistema confere o prazo maximo permitido e responde ao formando.
+
 ## CONTINUIDADE DA CONVERSA
 Voce JA esta em atendimento com esse formando. NUNCA se reapresente ("Ola, meu nome e
 Sophia...") e NUNCA pergunte "Em que posso te ajudar?" no meio da conversa - isso passa
@@ -1581,8 +1591,27 @@ NAO gere ###QUER_COMPRAR### de novo, NAO se reapresente e NAO pergunte "em que p
 Se ele desistir da compra, inclua ###SEM_INTERESSE###. Se pedir para falar com uma pessoa ou demonstrar irritacao, inclua ###OVERFLOW###.`;
   }
 
+  // Formando com compra programada para outra data
+  let contextoCompraFutura = '';
+  if (ehVendaMaterial && statusVendaAtual === 'compra_futura' && dadosContato.id) {
+    const { data: retornoAtivo } = await sb
+      .from('retornos_agendados')
+      .select('data_retorno')
+      .eq('contato_campanha_id', dadosContato.id)
+      .eq('status', 'agendado')
+      .maybeSingle();
+    if (retornoAtivo?.data_retorno) {
+      const [ra, rm, rd] = String(retornoAtivo.data_retorno).split('-');
+      contextoCompraFutura = `## COMPRA PROGRAMADA
+Este formando ja combinou de comprar em ${rd}/${rm}/${ra}, e o sistema vai chama-lo nessa data.
+Se ele so agradecer ou confirmar, responda de forma curta e cordial, sem pressionar.
+Se ele quiser antecipar e comprar agora, siga o fluxo normal de escolha da opcao (###QUER_COMPRAR###).
+Se ele quiser mudar a data, gere ###COMPRA_FUTURA### com a nova data.`;
+    }
+  }
+
   // Se ja existe agendamento, reforca isso no prompt para a IA nao repetir a pergunta
-  let contextoAgendamento = [contextoProrrogacao, contextoConferencia].filter(Boolean).join('\n\n');
+  let contextoAgendamento = [contextoProrrogacao, contextoConferencia, contextoCompraFutura].filter(Boolean).join('\n\n');
   if (contactId) {
     const { data: agendamentoRecente } = await sb
       .from('appointments')
@@ -1611,7 +1640,7 @@ Se ele desistir da compra, inclua ###SEM_INTERESSE###. Se pedir para falar com u
   );
 
   if (respostaIA) {
-    let novoStatus = emConferencia ? 'confirmando_dados' : 'em_conversa';
+    let novoStatus = emConferencia ? 'confirmando_dados' : (statusVendaAtual === 'compra_futura' ? 'compra_futura' : 'em_conversa');
     // Quando definido, substitui o texto da IA por uma mensagem padronizada do sistema
     let respostaSistema: string | null = null;
 
@@ -1789,6 +1818,57 @@ Se ele desistir da compra, inclua ###SEM_INTERESSE###. Se pedir para falar com u
       console.log(`[Processor] ${nomeCompleto} escolheu a opcao (${planoEscolhido}) - iniciando conferencia de dados`);
     }
 
+    // Formando prometeu comprar em outra data: programa o retorno automatico
+    if (ehVendaMaterial && !emConferencia && !respostaSistema && respostaIA.includes('###COMPRA_FUTURA###') && dadosContato.id) {
+      let dataPrometida = '';
+      try {
+        const m = respostaIA.match(/###COMPRA_FUTURA###([\s\S]*?)###FIM###/);
+        if (m && m[1]) dataPrometida = String(JSON.parse(m[1].trim()).data || '');
+      } catch (e) {
+        console.error('[Processor] Falha ao parsear COMPRA_FUTURA:', e);
+      }
+
+      let r: any = null;
+      try {
+        const resp = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/resgate-vendas`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+          },
+          body: JSON.stringify({
+            acao: 'agendar_retorno',
+            contato_campanha_id: dadosContato.id,
+            data: dataPrometida,
+            origem: 'ia',
+            trecho: texto_resposta,
+          }),
+        });
+        r = await resp.json();
+      } catch (e) {
+        console.error('[Processor] Erro ao agendar retorno:', e);
+      }
+
+      const pn = primeiroNome(nomeCompleto);
+      const fmt = (iso?: string | null) => {
+        if (!iso) return '';
+        const [a, m, d] = iso.split('-');
+        return `${d}/${m}/${a}`;
+      };
+
+      if (r?.ok) {
+        novoStatus = 'compra_futura';
+        respostaSistema = r.excecao
+          ? `Combinado${pn ? ', ' + pn : ''}! Como essa data passa do prazo de guarda do seu material, vou solicitar à nossa supervisão uma autorização especial para abrir uma exceção e manter suas fotos reservadas.\n\nNo dia ${fmt(r.data)} eu te chamo por aqui para finalizarmos, tudo bem? 📸`
+          : `Combinado${pn ? ', ' + pn : ''}! Anotei aqui: no dia ${fmt(r.data)} eu te chamo por aqui para finalizarmos a aquisição das suas fotos.\n\nAté lá, seu material fica reservado. 📸`;
+      } else if (r?.motivo === 'acima_do_limite') {
+        respostaSistema = `Entendo${pn ? ', ' + pn : ''}! Só preciso te avisar com transparência: o seu material só pode ficar guardado até ${fmt(r.limite)}, mesmo com autorização especial. Depois disso ele vai para reciclagem e não tem como recuperar.\n\nConsegue programar a compra até ${fmt(r.limite)}? Me diz a data que fica melhor pra você.`;
+      } else if (r?.motivo === 'data_passada' || r?.motivo === 'data_invalida') {
+        respostaSistema = `Só pra eu anotar certinho${pn ? ', ' + pn : ''}: em qual dia e mês você pretende finalizar a compra?`;
+      }
+      console.log(`[Processor] COMPRA_FUTURA ${nomeCompleto}: ${dataPrometida} ->`, r?.ok ? 'agendado' : r?.motivo);
+    }
+
     if (respostaIA.includes('###SEM_INTERESSE###')) {
       novoStatus = 'sem_interesse';
     }
@@ -1804,6 +1884,8 @@ Se ele desistir da compra, inclua ###SEM_INTERESSE###. Se pedir para falar com u
       .replace(/###AGENDAMENTO_CONFIRMADO###[\s\S]*?###FIM###/g, '')
       .replace(/###QUER_COMPRAR###[\s\S]*?###FIM###/g, '')
       .replace(/###QUER_COMPRAR###/g, '')
+      .replace(/###COMPRA_FUTURA###[\s\S]*?###FIM###/g, '')
+      .replace(/###COMPRA_FUTURA###/g, '')
       .replace(/###FIM###/g, '')
       .replace(/###OVERFLOW###/g, '')
       .replace(/###SEM_INTERESSE###/g, '')
@@ -1828,6 +1910,15 @@ Se ele desistir da compra, inclua ###SEM_INTERESSE###. Se pedir para falar com u
         .update({ status: novoStatus })
         .eq('campanha_id', campanha.id)
         .eq('telefone', telefone);
+
+      // Formando decidiu (comprar agora, desistir ou ir para humano): cancela retorno programado
+      if (ehVendaMaterial && dadosContato.id && ['confirmando_dados', 'sem_interesse', 'transferido_humano'].includes(novoStatus)) {
+        await sb
+          .from('retornos_agendados')
+          .update({ status: 'cancelado', motivo: `status_${novoStatus}` })
+          .eq('contato_campanha_id', dadosContato.id)
+          .eq('status', 'agendado');
+      }
 
       if (ehVendaMaterial && STATUS_VENDA_ENCERRADA.includes(novoStatus)) {
         // Venda encerrada pela IA (sem interesse / transferido): fecha a conversa

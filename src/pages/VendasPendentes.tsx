@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, Copy, ExternalLink, ShoppingCart } from 'lucide-react';
+import { CalendarClock, CheckCircle2, Copy, ExternalLink, ShoppingCart } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../hooks/useToast';
 import { ToastContainer } from '../components/Toast';
 import { ResgatePanel } from '../components/ResgatePanel';
+import { RetornosPanel, agendarRetornoManual } from '../components/RetornosPanel';
 
 interface VendaPendente {
   id: string;
@@ -27,8 +28,13 @@ interface VendaPendente {
 }
 
 function formatarValor(valor: string | null): string {
-  if (valor == null || valor.trim() === '') return 'Valor sob consulta';
-  return valor;
+  if (valor == null || String(valor).trim() === '') return 'Valor sob consulta';
+  const v = String(valor).trim();
+  // Importacoes antigas gravaram moeda no formato americano ("R$ 1,500.00")
+  const us = v.match(/^R\$\s*([\d,]+)\.(\d{2})$/);
+  if (us) return `R$ ${us[1].replace(/,/g, '.')},${us[2]}`;
+  if (/^\d+(\.\d+)?$/.test(v)) return Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  return v;
 }
 
 export function VendasPendentes() {
@@ -36,6 +42,10 @@ export function VendasPendentes() {
   const [vendas, setVendas] = useState<VendaPendente[]>([]);
   const [loading, setLoading] = useState(true);
   const [filtro, setFiltro] = useState<'pendentes' | 'concluidas' | 'todas'>('pendentes');
+  const [retornoAberto, setRetornoAberto] = useState<string | null>(null);
+  const [dataRetorno, setDataRetorno] = useState('');
+  const [retornosPorContato, setRetornosPorContato] = useState<Record<string, string>>({});
+  const [chaveRetornos, setChaveRetornos] = useState(0);
 
   useEffect(() => {
     carregar();
@@ -48,8 +58,16 @@ export function VendasPendentes() {
       .select(
         'id, nome, telefone, numero_contrato, valor_tabela, valor_oferecido, plano_escolhido, forma_pagamento_escolhida, formas_pagamento, opcoes_plano, quantidade_fotos, cpf, email, dados_confirmados_em, status, link_pagamento_enviado, atualizado_em, campanha_id'
       )
-      .in('status', ['confirmando_dados', 'interessado_compra', 'comprou'])
+      .in('status', ['confirmando_dados', 'compra_futura', 'interessado_compra', 'comprou'])
       .order('atualizado_em', { ascending: false });
+
+    const { data: rets } = await supabase
+      .from('retornos_agendados')
+      .select('contato_campanha_id, data_retorno')
+      .eq('status', 'agendado');
+    const mapa: Record<string, string> = {};
+    (rets || []).forEach((r: { contato_campanha_id: string; data_retorno: string }) => (mapa[r.contato_campanha_id] = r.data_retorno));
+    setRetornosPorContato(mapa);
 
     if (error) {
       console.error('[VendasPendentes] Erro ao carregar:', error);
@@ -93,6 +111,21 @@ export function VendasPendentes() {
     showToast('Telefone copiado', 'success');
   }
 
+  async function confirmarRetorno(id: string) {
+    if (!dataRetorno) {
+      showToast('Escolha a data do retorno', 'error');
+      return;
+    }
+    const r = await agendarRetornoManual(id, dataRetorno, 'manual');
+    showToast(r.mensagem, r.ok ? 'success' : 'error');
+    if (r.ok) {
+      setRetornoAberto(null);
+      setDataRetorno('');
+      setChaveRetornos((k) => k + 1);
+      carregar();
+    }
+  }
+
   function copiarTexto(texto: string, rotulo: string) {
     navigator.clipboard.writeText(texto);
     showToast(`${rotulo} copiado`, 'success');
@@ -104,7 +137,7 @@ export function VendasPendentes() {
   }
 
   const vendasFiltradas = vendas.filter((v) => {
-    if (filtro === 'pendentes') return v.status === 'interessado_compra' || v.status === 'confirmando_dados';
+    if (filtro === 'pendentes') return ['interessado_compra', 'confirmando_dados', 'compra_futura'].includes(v.status);
     if (filtro === 'concluidas') return v.status === 'comprou';
     return true;
   });
@@ -125,6 +158,7 @@ export function VendasPendentes() {
       </div>
 
       <ResgatePanel onToast={showToast} />
+      <RetornosPanel onToast={showToast} atualizarChave={chaveRetornos} />
 
       <div className="flex gap-2">
         {(['pendentes', 'concluidas', 'todas'] as const).map((f) => (
@@ -173,6 +207,15 @@ export function VendasPendentes() {
                         style={{ backgroundColor: 'var(--success)', color: 'white' }}
                       >
                         <CheckCircle2 size={12} /> Concluida
+                      </span>
+                    )}
+                    {v.status === 'compra_futura' && (
+                      <span
+                        className="text-xs px-2 py-0.5 rounded-full flex items-center gap-1"
+                        style={{ backgroundColor: 'var(--info)', color: 'white' }}
+                      >
+                        <CalendarClock size={12} /> Compra programada
+                        {retornosPorContato[v.id] ? ` · ${retornosPorContato[v.id].split('-').reverse().join('/')}` : ''}
                       </span>
                     )}
                     {v.status === 'confirmando_dados' && (
@@ -274,6 +317,41 @@ export function VendasPendentes() {
                   )}
                 </div>
               </div>
+
+              {v.status !== 'comprou' && (
+                <div className="flex flex-wrap items-center gap-2 mt-3 pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                  {retornoAberto === v.id ? (
+                    <>
+                      <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Formando vai comprar em:</span>
+                      <input
+                        type="date"
+                        value={dataRetorno}
+                        onChange={(e) => setDataRetorno(e.target.value)}
+                        className="input-dark"
+                        style={{ padding: '6px 10px' }}
+                      />
+                      <button onClick={() => confirmarRetorno(v.id)} className="btn-primary" style={{ padding: '6px 12px', fontSize: '12px' }}>
+                        Agendar retorno
+                      </button>
+                      <button onClick={() => setRetornoAberto(null)} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '12px' }}>
+                        Cancelar
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setRetornoAberto(v.id);
+                        setDataRetorno(retornosPorContato[v.id] || '');
+                      }}
+                      className="btn-secondary"
+                      style={{ padding: '6px 12px', fontSize: '12px' }}
+                      title="O formando disse que vai comprar em outra data: a IA chama ele de volta nesse dia"
+                    >
+                      <CalendarClock size={14} /> {retornosPorContato[v.id] ? 'Alterar retorno' : 'Agendar retorno'}
+                    </button>
+                  )}
+                </div>
+              )}
 
               {v.status === 'interessado_compra' && (
                 <div className="flex gap-2 mt-3 pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
