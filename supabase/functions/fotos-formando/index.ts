@@ -44,9 +44,26 @@ function mascarar(texto: string): string {
     .replace(/[A-Za-z0-9+/=_-]{40,}/g, (m) => `${m.slice(0, 6)}...(${m.length})`);
 }
 
+/** Procura o token da conta (usado no cabecalho Authtoken) em HTML/JSON/cookie */
+function extrairToken(texto: string): string | null {
+  const t = String(texto || '');
+  const padroes = [
+    /var\s+token\s*=\s*["']([A-Za-z0-9+/=_-]{20,})["']/i,
+    /["']?Token["']?\s*[:=]\s*["']([A-Za-z0-9+/=_-]{20,})["']/i,
+    /authtoken["']?\s*[:=,]\s*["']([A-Za-z0-9+/=_-]{20,})["']/i,
+    /%22Token%22%3A%22([A-Za-z0-9%+/=_-]{20,}?)%22/i,
+  ];
+  for (const re of padroes) {
+    const m = t.match(re);
+    if (m) return decodeURIComponent(m[1]);
+  }
+  return null;
+}
+
 class Sessao {
   cookies = new Map<string, string>();
   log: string[] = [];
+  authToken: string | null = null;
 
   guardarCookies(res: Response) {
     // deno-lint-ignore no-explicit-any
@@ -71,6 +88,10 @@ class Sessao {
       headers.set('User-Agent', UA);
       headers.set('Referer', `${BASE}/Painel`);
       if (this.cookies.size) headers.set('Cookie', this.cabecalhoCookie());
+      if (this.authToken) {
+        headers.set('Authtoken', this.authToken);
+        headers.set('Authtype', 'Token');
+      }
       const res = await fetch(atual, { ...opcoes, headers, redirect: 'manual' });
       this.guardarCookies(res);
       if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
@@ -115,7 +136,40 @@ class Sessao {
     this.log.push(`ValidarLogin -> ${r3.status} | cookies: ${[...this.cookies.keys()].join(', ') || 'nenhum'}`);
     this.log.push(`ValidarLogin resposta: ${mascarar(corpo).slice(0, 300)}`);
     this.log.push(`ValidarLogin cabecalhos: ${[...r3.headers.keys()].join(', ')}`);
-    return r3.ok;
+    if (!r3.ok) return false;
+
+    // O site guarda um token da conta que a API exige no cabecalho "Authtoken".
+    // 1) procura na resposta do login e nos cookies
+    this.authToken = extrairToken(corpo);
+    let origem = this.authToken ? 'resposta do login' : '';
+    if (!this.authToken) {
+      for (const [nome, valor] of this.cookies) {
+        const tk = extrairToken(decodeURIComponent(valor));
+        if (tk) { this.authToken = tk; origem = `cookie ${nome}`; break; }
+      }
+    }
+    // 2) procura nas paginas internas (Painel, Alunos)
+    for (const pagina of ['/Painel', '/Alunos']) {
+      if (this.authToken) break;
+      const rp = await this.req(pagina);
+      const html = await rp.text();
+      const tk = extrairToken(html);
+      this.log.push(`GET ${pagina} -> ${rp.status} (${Math.round(html.length / 1024)} kB)${tk ? ' | token encontrado' : ''}`);
+      if (tk) { this.authToken = tk; origem = `pagina ${pagina}`; break; }
+      for (const [nome, valor] of this.cookies) {
+        const tc = extrairToken(decodeURIComponent(valor));
+        if (tc) { this.authToken = tc; origem = `cookie ${nome}`; break; }
+      }
+    }
+    // 3) plano B: secret opcional
+    if (!this.authToken) {
+      const secreto = Deno.env.get('MEUSALBUNS_TOKEN')?.trim();
+      if (secreto) { this.authToken = secreto; origem = 'secret MEUSALBUNS_TOKEN'; }
+    }
+    this.log.push(this.authToken
+      ? `Token da API: encontrado (${origem})`
+      : 'Token da API: NAO encontrado (crie o secret MEUSALBUNS_TOKEN)');
+    return true;
   }
 }
 
