@@ -30,3 +30,6 @@ verify_jwt = false
 
 [functions.whatsapp-webhook]
 verify_jwt = false
+
+[functions.resgate-vendas]
+verify_jwt = false

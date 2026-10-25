@@ -1292,12 +1292,31 @@ case 'resposta_recebida': {
   // Busca dados completos do contato na campanha (nome, contrato, curso, endereco)
   const { data: contatoCampanhaData } = await sb
     .from('contatos_campanha')
-    .select('id, nome, numero_contrato, status, curso, local, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos, cpf, email, plano_escolhido, forma_pagamento_escolhida, dados_confirmados_em')
+    .select('id, nome, numero_contrato, status, curso, local, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos, cpf, email, plano_escolhido, forma_pagamento_escolhida, dados_confirmados_em, prazo_prorrogado, resgate_enviado_em')
     .eq('campanha_id', campanha.id)
     .eq('telefone', telefone)
     .maybeSingle();
 
   const dadosContato: any = contatoCampanhaData || {};
+
+  // Formando resgatado: o prazo que vale passa a ser o prorrogado
+  let contextoProrrogacao = '';
+  if (dadosContato.prazo_prorrogado) {
+    const [pa, pm, pd] = String(dadosContato.prazo_prorrogado).split('-');
+    const prazoBR = `${pd}/${pm}/${pa}`;
+    dadosContato.prazo_reciclagem = `${prazoBR} (prazo PRORROGADO - prazo final, nao existe nova prorrogacao)`;
+    contextoProrrogacao = `## PRORROGACAO EXCEPCIONAL (regra prioritaria)
+Este formando ja tinha perdido o prazo original e recebeu uma mensagem avisando de uma prorrogacao
+excepcional, concedida so para quem demonstrou interesse e nao finalizou. O NOVO PRAZO FINAL e ${prazoBR}.
+Use sempre essa data quando falar de prazo. Nunca prometa outra prorrogacao. Se ele responder com
+interesse, retome de forma objetiva: lembre o valor de tabela, apresente as opcoes promocionais e
+pergunte qual prefere. Nao repita o aviso da prorrogacao inteiro, ele ja recebeu.`;
+  }
+
+  // Registra a interacao (usado no resgate automatico: "demonstrou interesse nos ultimos dias")
+  if (dadosContato.id) {
+    await sb.from('contatos_campanha').update({ interagiu_em: new Date().toISOString() }).eq('id', dadosContato.id);
+  }
   const nomeCompleto = dadosContato.nome || nome;
 
   // Busca ou cria contact_id (necessario para historico e agendamento)
@@ -1563,7 +1582,7 @@ Se ele desistir da compra, inclua ###SEM_INTERESSE###. Se pedir para falar com u
   }
 
   // Se ja existe agendamento, reforca isso no prompt para a IA nao repetir a pergunta
-  let contextoAgendamento = contextoConferencia;
+  let contextoAgendamento = [contextoProrrogacao, contextoConferencia].filter(Boolean).join('\n\n');
   if (contactId) {
     const { data: agendamentoRecente } = await sb
       .from('appointments')

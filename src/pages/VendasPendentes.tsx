@@ -3,6 +3,7 @@ import { CheckCircle2, Copy, ExternalLink, ShoppingCart } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../hooks/useToast';
 import { ToastContainer } from '../components/Toast';
+import { ResgatePanel } from '../components/ResgatePanel';
 
 interface VendaPendente {
   id: string;
@@ -122,6 +123,8 @@ export function VendasPendentes() {
           </p>
         </div>
       </div>
+
+      <ResgatePanel onToast={showToast} />
 
       <div className="flex gap-2">
         {(['pendentes', 'concluidas', 'todas'] as const).map((f) => (
