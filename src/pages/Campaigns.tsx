@@ -47,6 +47,21 @@ const ESCRITORIO_ENDERECO = 'Escritorio - Rua Judith Motta, Parque 10 de Novembr
 
 type TipoAtendimento = 'visita_externa' | 'escritorio' | 'venda_material';
 
+// CPF vindo do Excel pode perder zeros a esquerda (vira numero) - repoe ate 11 digitos
+function normalizarCpfPlanilha(valor: unknown): string | undefined {
+  if (valor === null || valor === undefined) return undefined;
+  let digitos = String(valor).replace(/\D/g, '');
+  if (!digitos) return undefined;
+  if (digitos.length >= 9 && digitos.length < 11) digitos = digitos.padStart(11, '0');
+  if (digitos.length !== 11) return String(valor).trim() || undefined;
+  return `${digitos.slice(0, 3)}.${digitos.slice(3, 6)}.${digitos.slice(6, 9)}-${digitos.slice(9)}`;
+}
+
+function normalizarEmailPlanilha(valor: unknown): string | undefined {
+  const email = String(valor ?? '').trim().toLowerCase();
+  return email || undefined;
+}
+
 type OpcaoAgendamento = { data: string; tipo?: 'visita_externa' | 'escritorio'; turnos: string[]; horarios?: string[] };
 
 function formatarDatasDisponiveis(
@@ -229,6 +244,14 @@ export function Campaigns() {
           local: c.local || null,
           curso: c.curso || null,
           numero_contrato: c.numero_contrato || null,
+          valor_tabela: c.valor_tabela || null,
+          valor_oferecido: c.valor_oferecido || null,
+          formas_pagamento: c.formas_pagamento || null,
+          opcoes_plano: c.opcoes_plano || null,
+          prazo_reciclagem: c.prazo_reciclagem || null,
+          quantidade_fotos: c.quantidade_fotos || null,
+          cpf: c.cpf || null,
+          email: c.email || null,
         }));
 
       if (contatosParaInserir.length > 0) {
@@ -246,7 +269,7 @@ export function Campaigns() {
       // 3. Busca todos os contatos da campanha (com UUIDs reais)
       const { data: contatosComUUID, error: fetchError } = await supabase
         .from('contatos_campanha')
-        .select('id, telefone, nome, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem')
+        .select('id, telefone, nome, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos')
         .eq('campanha_id', campanha.id)
         .eq('status', 'aguardando_inicio');
 
@@ -447,6 +470,8 @@ export function Campaigns() {
     const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
     const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem'));
     const quantidadeFotosIdx = headers.findIndex((h) => h.includes('quantidade_fotos') || h.includes('quantidade de fotos') || h.includes('qtd_fotos') || h.includes('qtd fotos') || h.includes('numero de fotos'));
+    const cpfIdx = headers.findIndex((h) => h.includes('cpf'));
+    const emailIdx = headers.findIndex((h) => h.includes('email') || h.includes('e-mail') || h.includes('e mail'));
 
     if (nomeIdx === -1 || telefoneIdx === -1) {
       const foundHeaders = rawHeaders.join(', ');
@@ -456,7 +481,7 @@ export function Campaigns() {
       throw new Error(`Colunas obrigatorias nao encontradas: ${missing.join(', ')}\n\nCabecalhos encontrados: ${foundHeaders}`);
     }
 
-    const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string; quantidade_fotos?: string }> = [];
+    const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string; quantidade_fotos?: string; cpf?: string; email?: string }> = [];
 
     for (let i = 1; i < lines.length; i++) {
       try {
@@ -482,6 +507,8 @@ export function Campaigns() {
           opcoes_plano: opcoesPlanoIdx !== -1 ? (values[opcoesPlanoIdx] || undefined) : undefined,
           prazo_reciclagem: prazoReciclagemIdx !== -1 ? (values[prazoReciclagemIdx] || undefined) : undefined,
           quantidade_fotos: quantidadeFotosIdx !== -1 ? (values[quantidadeFotosIdx] || undefined) : undefined,
+          cpf: cpfIdx !== -1 ? normalizarCpfPlanilha(values[cpfIdx]) : undefined,
+          email: emailIdx !== -1 ? normalizarEmailPlanilha(values[emailIdx]) : undefined,
         });
       } catch (lineErr) {
         console.warn(`Error parsing line ${i + 1}:`, lineErr);
@@ -499,7 +526,7 @@ export function Campaigns() {
   const parseExcel = async (file: File): Promise<Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string }>> => {
     try {
       const arrayBuffer = await file.arrayBuffer();
-      const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+      const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
 
       if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
         throw new Error('Arquivo Excel vazio.');
@@ -507,7 +534,10 @@ export function Campaigns() {
 
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
-      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false }) as string[][];
+      // Texto formatado (datas sempre em dd/mm/aaaa) + valores brutos (pra
+      // formatar moeda e nao perder zeros/precisao de CPF e quantidade)
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, dateNF: 'dd/mm/yyyy' }) as string[][];
+      const jsonRaw = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: true }) as unknown[][];
 
       if (!jsonData || jsonData.length < 2) {
         throw new Error('Planilha vazia ou sem cabecalho.');
@@ -532,6 +562,8 @@ export function Campaigns() {
       const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
       const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem'));
       const quantidadeFotosIdx = headers.findIndex((h) => h.includes('quantidade_fotos') || h.includes('quantidade de fotos') || h.includes('qtd_fotos') || h.includes('qtd fotos') || h.includes('numero de fotos'));
+      const cpfIdx = headers.findIndex((h) => h.includes('cpf'));
+      const emailIdx = headers.findIndex((h) => h.includes('email') || h.includes('e-mail') || h.includes('e mail'));
 
       if (nomeIdx === -1 || telefoneIdx === -1) {
         const foundHeaders = rawHeaders.join(', ');
@@ -541,10 +573,35 @@ export function Campaigns() {
         throw new Error(`Colunas obrigatorias nao encontradas: ${missing.join(', ')}.\n\nCabecalhos encontrados: ${foundHeaders}`);
       }
 
-      const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string; quantidade_fotos?: string }> = [];
+      const contacts: Array<{ nome: string; telefone: string; local?: string; curso?: string; numero_contrato?: string; data?: string; valor_tabela?: string; valor_oferecido?: string; formas_pagamento?: string; opcoes_plano?: string; prazo_reciclagem?: string; quantidade_fotos?: string; cpf?: string; email?: string }> = [];
 
       for (let i = 1; i < jsonData.length; i++) {
         const values = jsonData[i] || [];
+        const rawValues = jsonRaw[i] || [];
+        const celulaData = (idx: number): string | undefined => {
+          if (idx === -1) return undefined;
+          const bruto = rawValues[idx];
+          if (bruto instanceof Date) {
+            const d = String(bruto.getUTCDate()).padStart(2, '0');
+            const m = String(bruto.getUTCMonth() + 1).padStart(2, '0');
+            return `${d}/${m}/${bruto.getUTCFullYear()}`;
+          }
+          return String(values[idx] || '') || undefined;
+        };
+        const celulaMoeda = (idx: number): string | undefined => {
+          if (idx === -1) return undefined;
+          const bruto = rawValues[idx];
+          if (typeof bruto === 'number') {
+            return bruto.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+          }
+          return String(values[idx] || '') || undefined;
+        };
+        const celulaBruta = (idx: number): string | undefined => {
+          if (idx === -1) return undefined;
+          const bruto = rawValues[idx];
+          if (bruto === null || bruto === undefined || bruto === '') return undefined;
+          return typeof bruto === 'number' ? String(Math.round(bruto)) : String(bruto).trim() || undefined;
+        };
         if (values.length < Math.max(nomeIdx, telefoneIdx) + 1) continue;
 
         const nome = values[nomeIdx];
@@ -560,12 +617,14 @@ export function Campaigns() {
           curso: cursoIdx !== -1 ? String(values[cursoIdx] || '') || undefined : undefined,
           numero_contrato: contratoIdx !== -1 ? String(values[contratoIdx] || '') || undefined : undefined,
           data: dataIdx !== -1 ? String(values[dataIdx] || '') || undefined : undefined,
-          valor_tabela: valorTabelaIdx !== -1 ? String(values[valorTabelaIdx] || '') || undefined : undefined,
+          valor_tabela: celulaMoeda(valorTabelaIdx),
           valor_oferecido: valorOferecidoIdx !== -1 ? String(values[valorOferecidoIdx] || '') || undefined : undefined,
           formas_pagamento: formasPagamentoIdx !== -1 ? String(values[formasPagamentoIdx] || '') || undefined : undefined,
           opcoes_plano: opcoesPlanoIdx !== -1 ? String(values[opcoesPlanoIdx] || '') || undefined : undefined,
-          prazo_reciclagem: prazoReciclagemIdx !== -1 ? String(values[prazoReciclagemIdx] || '') || undefined : undefined,
-          quantidade_fotos: quantidadeFotosIdx !== -1 ? String(values[quantidadeFotosIdx] || '') || undefined : undefined,
+          prazo_reciclagem: celulaData(prazoReciclagemIdx),
+          quantidade_fotos: celulaBruta(quantidadeFotosIdx),
+          cpf: cpfIdx !== -1 ? normalizarCpfPlanilha(celulaBruta(cpfIdx)) : undefined,
+          email: emailIdx !== -1 ? normalizarEmailPlanilha(values[emailIdx]) : undefined,
         });
       }
 
@@ -932,8 +991,10 @@ export function Campaigns() {
                       as colunas: <strong>valor_tabela</strong>, <strong>valor_oferecido</strong>,{' '}
                       <strong>formas_pagamento</strong>, <strong>opcoes_plano</strong>,{' '}
                       <strong>prazo_reciclagem</strong> (esta ultima pode ser o mesmo texto pra todos,
-                      ex: "31/10/2026") e <strong>quantidade_fotos</strong> (quantidade de fotos/videos
-                      que o formando tem disponivel, pra IA responder se ele perguntar).
+                      ex: "31/10/2026"), <strong>quantidade_fotos</strong> (quantidade de fotos do acervo
+                      do formando, a IA informa exatamente esse numero), <strong>cpf</strong> e{' '}
+                      <strong>email</strong> (a IA pede pro formando confirmar esses dados depois que ele
+                      escolhe a opcao, deixando tudo pronto pro link de pagamento).
                     </p>
                     <p className="text-xs mt-1" style={{ color: 'var(--info)' }}>
                       Dica: use {`{valor_tabela}`}, {`{valor_oferecido}`}, {`{formas_pagamento}`},{' '}

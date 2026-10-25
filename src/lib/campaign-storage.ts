@@ -19,6 +19,8 @@ export interface ContatoCampanha {
   opcoes_plano?: string;
   prazo_reciclagem?: string;
   quantidade_fotos?: string;
+  cpf?: string;
+  email?: string;
 }
 
 export interface Campanha {
@@ -107,6 +109,8 @@ export async function createCampanha(
     opcoes_plano?: string;
     prazo_reciclagem?: string;
     quantidade_fotos?: string;
+    cpf?: string;
+    email?: string;
   }>
 ): Promise<{ success: boolean; campanhaId?: string; source: 'supabase' | 'local'; error?: string }> {
   const now = new Date().toISOString();
@@ -152,15 +156,23 @@ export async function createCampanha(
         opcoes_plano: c.opcoes_plano || null,
         prazo_reciclagem: c.prazo_reciclagem || null,
         quantidade_fotos: c.quantidade_fotos || null,
+        cpf: c.cpf || null,
+        email: c.email || null,
       }));
 
       const { data: contatosInseridos, error: contatosError } = await supabase
         .from('contatos_campanha')
         .insert(contatosParaInserir)
-        .select('id, nome, telefone, status, local, curso, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos');
+        .select('id, nome, telefone, status, local, curso, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos, cpf, email');
 
       if (contatosError) {
-        console.warn('[Storage] Error saving contacts to Supabase:', contatosError);
+        console.error('[Storage] Error saving contacts to Supabase:', contatosError);
+        return {
+          success: false,
+          campanhaId,
+          source: 'supabase',
+          error: `A campanha foi criada, mas os contatos nao foram salvos: ${contatosError.message}`,
+        };
       }
 
       // Save to localStorage as backup with real UUIDs
@@ -187,6 +199,8 @@ export async function createCampanha(
           opcoes_plano: c.opcoes_plano,
           prazo_reciclagem: c.prazo_reciclagem,
           quantidade_fotos: c.quantidade_fotos,
+          cpf: c.cpf,
+          email: c.email,
         })),
       });
       saveLocalCampanhas(localCampanhas);
@@ -227,6 +241,8 @@ export async function createCampanha(
       opcoes_plano: c.opcoes_plano,
       prazo_reciclagem: c.prazo_reciclagem,
       quantidade_fotos: c.quantidade_fotos,
+      cpf: c.cpf,
+      email: c.email,
     }));
 
     const newCampanha: Campanha = {

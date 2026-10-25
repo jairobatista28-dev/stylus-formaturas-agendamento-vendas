@@ -193,8 +193,8 @@ async function chamarGemini(
 
     // Variaveis exclusivas do fluxo de venda de material fotografico (so tem
     // efeito se a campanha tiver esses placeholders no prompt_ia personalizado)
-    systemPrompt = systemPrompt.replace(/\{valor_tabela\}/gi, contatoData.valor_tabela ?? 'valor sob consulta');
-    systemPrompt = systemPrompt.replace(/\{valor_oferecido\}/gi, contatoData.valor_oferecido ?? 'valor sob consulta');
+    systemPrompt = systemPrompt.replace(/\{valor_tabela\}/gi, String(contatoData.valor_tabela ?? 'valor sob consulta'));
+    systemPrompt = systemPrompt.replace(/\{valor_oferecido\}/gi, String(contatoData.valor_oferecido ?? 'valor sob consulta'));
     systemPrompt = systemPrompt.replace(/\{formas_pagamento\}/gi, contatoData.formas_pagamento || 'consulte as opcoes disponiveis');
     systemPrompt = systemPrompt.replace(/\{opcoes_plano\}/gi, contatoData.opcoes_plano || 'consulte as opcoes disponiveis');
     systemPrompt = systemPrompt.replace(/\{prazo_reciclagem\}/gi, contatoData.prazo_reciclagem || 'em breve');
@@ -726,12 +726,13 @@ async function executarFluxoCampanha(
   let textosFormando: string[] = [];
 
   if (statusAtual === 'em_conversa' || statusAtual === 'agendado') {
-    const { data: mensagens } = await sb
+    const { data: mensagensDesc } = await sb
       .from('messages')
       .select('*')
       .eq('contact_id', contactId)
-      .order('created_at', { ascending: true })
-      .limit(20);
+      .order('created_at', { ascending: false })
+      .limit(30);
+    const mensagens = (mensagensDesc || []).slice().reverse();
 
     textosFormando = (mensagens || []).filter((m: any) => m.direction === 'in').map((m: any) => (m.content || '').toLowerCase());
 
@@ -876,7 +877,7 @@ async function executarFluxoCampanha(
         }
       }
     } catch (e) {
-      console.error('[Erro] Falha ao parsear agendamento - JSON recebido:', jsonMatch?.[1], '| Erro:', e);
+      console.error('[Erro] Falha ao parsear agendamento | Erro:', e);
     }
   }
 
@@ -1165,6 +1166,8 @@ serve(async (req) => {
       .select('*, campanhas(*)')
       .eq('contato_telefone', telefoneNormalizado)
       .eq('aguardando_resposta', true)
+      .order('updated_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
 
     if (conversaEstado) {
@@ -1192,6 +1195,88 @@ serve(async (req) => {
       }
 
       return new Response(JSON.stringify({ success: true, message: 'Processado via state machine' }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // 0.5 VENDA DE MATERIAL FOTOGRAFICO
+    // Toda resposta de um formando com venda em andamento vai para o
+    // campanha-processor, que tem o prompt completo de vendas (com a quantidade
+    // de fotos da planilha) e a etapa de conferencia de CPF/e-mail. Assim a
+    // conversa nunca cai no fluxo generico ("Ola, sou a Sophia... em que posso
+    // te ajudar?") depois que o formando escolhe a opcao.
+    const { data: contatoVenda } = await sb
+      .from('contatos_campanha')
+      .select('id, campanha_id, status, dados_confirmados_em, campanhas!inner(tipo_atendimento)')
+      .eq('telefone', telefoneNormalizado)
+      .eq('campanhas.tipo_atendimento', 'venda_material')
+      .in('status', ['enviando', 'saudacao_enviada', 'sem_retorno', 'em_conversa', 'confirmando_dados', 'interessado_compra', 'comprou'])
+      .order('atualizado_em', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (contatoVenda) {
+      const vendaJaRepassada =
+        contatoVenda.status === 'comprou' ||
+        (contatoVenda.status === 'interessado_compra' && !!contatoVenda.dados_confirmados_em);
+
+      if (vendaJaRepassada) {
+        // Venda ja esta com o especialista humano: so registra a mensagem
+        // (sem resposta automatica) e garante o modo manual
+        console.log(`[Webhook] Venda de ${telefoneNormalizado} ja repassada ao humano - salvando sem IA`);
+        let contactIdVenda = contatoManual?.id as string | undefined;
+        if (!contactIdVenda) {
+          const { data: novo } = await sb
+            .from('contacts')
+            .insert({ phone: telefoneNormalizado, name: telefoneNormalizado, status: 'lead', assigned_to: 'manual' })
+            .select('id')
+            .single();
+          contactIdVenda = novo?.id;
+        }
+        if (contactIdVenda) {
+          await sb.from('messages').insert({
+            contact_id: contactIdVenda,
+            direction: 'in',
+            content: textoRecebido,
+            sent_by: 'contato',
+            message_type: ehMidia ? tipoMensagem : 'text',
+            media_url: mediaUrlRecebida,
+          });
+          await sb
+            .from('contacts')
+            .update({ assigned_to: 'manual', unread_count: (contatoManual?.unread_count || 0) + 1 })
+            .eq('id', contactIdVenda);
+        }
+        return new Response(JSON.stringify({ success: true, skipped: true, reason: 'venda_com_humano' }), {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      console.log(`[Webhook] Venda de material em andamento (${contatoVenda.status}) - acionando campanha-processor`);
+      try {
+        await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/campanha-processor`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+          },
+          body: JSON.stringify({
+            acao: 'resposta_recebida',
+            telefone: telefoneNormalizado,
+            campanha_id: contatoVenda.campanha_id,
+            texto_resposta: textoRecebido,
+            message_type: ehMidia ? tipoMensagem : 'text',
+            media_url: mediaUrlRecebida,
+            criar_conversa_se_ausente: true,
+          }),
+        });
+      } catch (err) {
+        console.error('[Webhook] Erro ao chamar campanha-processor (venda):', err);
+      }
+
+      return new Response(JSON.stringify({ success: true, message: 'Processado via fluxo de venda' }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });

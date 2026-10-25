@@ -15,6 +15,10 @@ interface VendaPendente {
   forma_pagamento_escolhida: string | null;
   formas_pagamento: string | null;
   opcoes_plano: string | null;
+  quantidade_fotos: string | null;
+  cpf: string | null;
+  email: string | null;
+  dados_confirmados_em: string | null;
   status: string;
   link_pagamento_enviado: boolean;
   atualizado_em: string;
@@ -41,9 +45,9 @@ export function VendasPendentes() {
     const { data, error } = await supabase
       .from('contatos_campanha')
       .select(
-        'id, nome, telefone, numero_contrato, valor_tabela, valor_oferecido, plano_escolhido, forma_pagamento_escolhida, formas_pagamento, opcoes_plano, status, link_pagamento_enviado, atualizado_em, campanha_id'
+        'id, nome, telefone, numero_contrato, valor_tabela, valor_oferecido, plano_escolhido, forma_pagamento_escolhida, formas_pagamento, opcoes_plano, quantidade_fotos, cpf, email, dados_confirmados_em, status, link_pagamento_enviado, atualizado_em, campanha_id'
       )
-      .in('status', ['interessado_compra', 'comprou'])
+      .in('status', ['confirmando_dados', 'interessado_compra', 'comprou'])
       .order('atualizado_em', { ascending: false });
 
     if (error) {
@@ -88,13 +92,18 @@ export function VendasPendentes() {
     showToast('Telefone copiado', 'success');
   }
 
+  function copiarTexto(texto: string, rotulo: string) {
+    navigator.clipboard.writeText(texto);
+    showToast(`${rotulo} copiado`, 'success');
+  }
+
   function abrirWhatsapp(telefone: string) {
     const numero = telefone.replace(/\D/g, '');
     window.open(`https://wa.me/${numero}`, '_blank');
   }
 
   const vendasFiltradas = vendas.filter((v) => {
-    if (filtro === 'pendentes') return v.status === 'interessado_compra';
+    if (filtro === 'pendentes') return v.status === 'interessado_compra' || v.status === 'confirmando_dados';
     if (filtro === 'concluidas') return v.status === 'comprou';
     return true;
   });
@@ -163,6 +172,23 @@ export function VendasPendentes() {
                         <CheckCircle2 size={12} /> Concluida
                       </span>
                     )}
+                    {v.status === 'confirmando_dados' && (
+                      <span
+                        className="text-xs px-2 py-0.5 rounded-full"
+                        style={{ backgroundColor: 'var(--warning)', color: 'white' }}
+                        title="O formando escolheu a opcao e a IA esta conferindo CPF e e-mail"
+                      >
+                        Conferindo dados
+                      </span>
+                    )}
+                    {v.status === 'interessado_compra' && v.dados_confirmados_em && !v.link_pagamento_enviado && (
+                      <span
+                        className="text-xs px-2 py-0.5 rounded-full"
+                        style={{ backgroundColor: 'var(--success)', color: 'white' }}
+                      >
+                        Pronto para o link
+                      </span>
+                    )}
                     {v.status === 'interessado_compra' && v.link_pagamento_enviado && (
                       <span
                         className="text-xs px-2 py-0.5 rounded-full"
@@ -174,6 +200,7 @@ export function VendasPendentes() {
                   </div>
                   <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
                     Contrato: {v.numero_contrato || '-'} · {v.telefone}
+                    {v.quantidade_fotos ? ` · ${v.quantidade_fotos} fotos` : ''}
                   </p>
                 </div>
 
@@ -213,6 +240,35 @@ export function VendasPendentes() {
                 <div>
                   <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Pagamento escolhido</p>
                   <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{v.forma_pagamento_escolhida || v.formas_pagamento || '-'}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      CPF {v.dados_confirmados_em ? '(confirmado)' : '(nao confirmado)'}
+                    </p>
+                    <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{v.cpf || '-'}</p>
+                  </div>
+                  {v.cpf && (
+                    <button onClick={() => copiarTexto(v.cpf as string, 'CPF')} className="btn-icon" style={{ padding: '6px' }} title="Copiar CPF">
+                      <Copy size={14} />
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      E-mail {v.dados_confirmados_em ? '(confirmado)' : '(nao confirmado)'}
+                    </p>
+                    <p className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{v.email || '-'}</p>
+                  </div>
+                  {v.email && (
+                    <button onClick={() => copiarTexto(v.email as string, 'E-mail')} className="btn-icon" style={{ padding: '6px' }} title="Copiar e-mail">
+                      <Copy size={14} />
+                    </button>
+                  )}
                 </div>
               </div>
 

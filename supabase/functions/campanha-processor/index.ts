@@ -83,6 +83,8 @@ interface DadosVenda {
   opcoes_plano?: string | null;
   prazo_reciclagem?: string | null;
   quantidade_fotos?: string | null;
+  cpf?: string | null;
+  email?: string | null;
 }
 
 /**
@@ -187,6 +189,155 @@ function formatarPlanosDisponiveis(texto?: string | null): string {
   return partes
     .map((p, i) => `▫️ Plano ${String(i + 1).padStart(2, '0')}: ${p}`)
     .join('\n');
+}
+
+// ============================================================================
+// VENDA DE MATERIAL FOTOGRAFICO - CONFERENCIA DE DADOS (CPF / E-MAIL)
+// ============================================================================
+
+// Prazo informado ao formando para receber o link de pagamento
+const PRAZO_LINK_PAGAMENTO = '48 horas';
+
+// true  = na conferencia o CPF aparece parcialmente (123.***.***-45), por seguranca
+// false = mostra o CPF completo (123.456.789-45)
+const MASCARAR_CPF_NA_CONFERENCIA = true;
+
+// Status de contatos_campanha que encerram o atendimento da IA na venda
+const STATUS_VENDA_ENCERRADA = ['sem_interesse', 'transferido_humano', 'interessado_compra', 'comprou'];
+
+function somenteDigitos(v?: string | null): string {
+  return String(v ?? '').replace(/\D/g, '');
+}
+
+/** Normaliza CPF vindo da planilha (repoe zeros a esquerda perdidos pelo Excel) */
+function normalizarCPF(v?: string | null): string {
+  let d = somenteDigitos(v);
+  if (d.length >= 9 && d.length < 11) d = d.padStart(11, '0');
+  return d;
+}
+
+function cpfValido(v?: string | null): boolean {
+  const cpf = normalizarCPF(v);
+  if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
+  const digito = (base: string, pesoInicial: number) => {
+    let soma = 0;
+    for (let i = 0; i < base.length; i++) soma += parseInt(base[i], 10) * (pesoInicial - i);
+    const resto = (soma * 10) % 11;
+    return resto === 10 ? 0 : resto;
+  };
+  return digito(cpf.slice(0, 9), 10) === parseInt(cpf[9], 10) &&
+    digito(cpf.slice(0, 10), 11) === parseInt(cpf[10], 10);
+}
+
+function formatarCPF(v?: string | null): string {
+  const d = normalizarCPF(v);
+  if (d.length !== 11) return String(v ?? '');
+  return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+}
+
+function cpfParaExibir(v?: string | null): string {
+  const d = normalizarCPF(v);
+  if (d.length !== 11) return String(v ?? '');
+  return MASCARAR_CPF_NA_CONFERENCIA ? `${d.slice(0, 3)}.***.***-${d.slice(9)}` : formatarCPF(d);
+}
+
+function emailValido(v?: string | null): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(v ?? '').trim());
+}
+
+/** Procura um CPF digitado na mensagem (com ou sem pontuacao) */
+function extrairCPF(texto: string): string | null {
+  const candidatos = texto.match(/\d[\d.\-\s]{9,16}\d/g) || [];
+  for (const c of candidatos) {
+    const d = somenteDigitos(c);
+    if (d.length === 11) return d;
+  }
+  return null;
+}
+
+function extrairEmail(texto: string): string | null {
+  const m = texto.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+  return m ? m[0].toLowerCase() : null;
+}
+
+function normalizarTexto(t: string): string {
+  return t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Classifica a resposta do formando na conferencia: confirmou, negou ou outra coisa */
+function classificarConfirmacao(textoOriginal: string): 'sim' | 'nao' | 'indefinido' {
+  const t = normalizarTexto(textoOriginal);
+  if (t === 's' || t === 'ss') return 'sim';
+  if (t === 'n') return 'nao';
+  const negativo = /\b(nao|errado|errada|errados|incorreto|incorreta|incorretos|mudou|mudei|mudaram|desatualizado|desatualizada|trocar|troquei|alterar|corrigir)\b/.test(t);
+  if (negativo) return 'nao';
+  const positivo = /\b(sim|sin|isso|correto|correta|corretos|certo|certa|certos|ok|okay|confirmo|confirmado|confirmados|confirmada|pode|positivo|exato|exatamente|perfeito|beleza|blz|claro|yes|si|uhum|aham|tudo certo)\b/.test(t) ||
+    /\u{1F44D}|\u{2705}|\u{1F44C}/u.test(textoOriginal);
+  return positivo ? 'sim' : 'indefinido';
+}
+
+function primeiroNome(nome?: string | null): string {
+  const p = String(nome || '').trim().split(/\s+/)[0] || '';
+  if (!p) return '';
+  return p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
+}
+
+function descreverPlano(plano?: string | null, forma?: string | null): string {
+  const p = String(plano || '').trim();
+  const f = String(forma || '').trim();
+  if (!p && !f) return 'a opção escolhida';
+  if (!p) return f;
+  if (!f || p.toLowerCase().includes(f.toLowerCase())) return p;
+  return `${p} (${f})`;
+}
+
+/** "340" -> "340" | "1234" -> "1.234" | texto livre fica como esta */
+function formatarQuantidadeFotos(q?: string | null): string {
+  const bruto = String(q ?? '').trim();
+  if (!bruto) return '';
+  if (/^\d+$/.test(bruto)) return Number(bruto).toLocaleString('pt-BR');
+  return bruto;
+}
+
+function textoPedidoDadosFaltantes(faltaCpf: boolean, faltaEmail: boolean): string {
+  if (faltaCpf && faltaEmail) return 'o seu CPF e o seu e-mail atualizados';
+  if (faltaCpf) return 'o seu CPF completo';
+  return 'o seu e-mail atualizado';
+}
+
+/** Mensagem enviada logo apos o formando escolher a opcao: confirma a escolha e pede a conferencia de CPF/e-mail */
+function montarMensagemConferencia(nome: string, plano: string | null | undefined, forma: string | null | undefined, cpf?: string | null, email?: string | null): string {
+  const pn = primeiroNome(nome);
+  const temCpf = cpfValido(cpf);
+  const temEmail = emailValido(email);
+  const temPlano = !!(String(plano || '').trim() || String(forma || '').trim());
+  const abertura = temPlano
+    ? `Perfeito${pn ? ', ' + pn : ''}! Anotei sua escolha: ${descreverPlano(plano, forma)}.`
+    : `Perfeito${pn ? ', ' + pn : ''}! Antes de passar seu atendimento para o nosso especialista, preciso só de uma conferência rápida.`;
+
+  if (!temCpf && !temEmail) {
+    return `${abertura}\n\nPra deixar tudo pronto para o envio do seu link de pagamento, me informe, por favor, ${textoPedidoDadosFaltantes(true, true)}.`;
+  }
+
+  const linhas: string[] = [];
+  if (temCpf) linhas.push(`CPF: ${cpfParaExibir(cpf)}`);
+  if (temEmail) linhas.push(`E-mail: ${String(email).trim().toLowerCase()}`);
+
+  let pedido = `Pra deixar tudo pronto para o envio do seu link de pagamento, confirma pra mim se ${linhas.length > 1 ? 'seus dados estão corretos e atualizados' : 'esse dado está correto e atualizado'}:\n\n${linhas.join('\n')}`;
+  if (!temCpf || !temEmail) {
+    pedido += `\n\nE me informe também ${textoPedidoDadosFaltantes(!temCpf, !temEmail)}, por favor.`;
+  } else {
+    pedido += `\n\nEstá tudo certo? Se algum dado mudou, é só me mandar o correto por aqui.`;
+  }
+  return `${abertura}\n\n${pedido}`;
+}
+
+/** Mensagem final: dados confirmados, atendimento repassado ao especialista humano */
+function montarMensagemRepasseHumano(nome: string, plano: string | null | undefined, forma: string | null | undefined, dadosAtualizados: boolean): string {
+  const pn = primeiroNome(nome);
+  return `Tudo certo${pn ? ', ' + pn : ''}! \u2705 ${dadosAtualizados ? 'Atualizei e confirmei seus dados.' : 'Seus dados estão confirmados.'}\n\n` +
+    `Agora vou repassar seu atendimento para um especialista da nossa equipe. Ele vai finalizar com você, enviando o link de pagamento referente à sua escolha${(String(plano || '').trim() || String(forma || '').trim()) ? ` (${descreverPlano(plano, forma)})` : ''} em até ${PRAZO_LINK_PAGAMENTO}.\n\n` +
+    `Assim que o pagamento for confirmado, suas fotos são liberadas para você. Obrigada pela confiança! \u{1F4F8}`;
 }
 
 /**
@@ -324,15 +475,24 @@ async function notificarInteresseDeCompra(
   nomeContato: string,
   dadosVenda: DadosVenda | undefined,
   planoEscolhido: string,
-  formaPagamentoEscolhida: string
+  formaPagamentoEscolhida: string,
+  extras?: { telefone?: string; cpf?: string | null; email?: string | null }
 ): Promise<void> {
-  const mensagem = `🎉 *Novo interessado em comprar material fotografico!*\n\n` +
+  const qtdFotos = formatarQuantidadeFotos(dadosVenda?.quantidade_fotos);
+  const blocoDadosConfirmados = extras
+    ? `🪪 *CPF:* ${extras.cpf ? formatarCPF(extras.cpf) : 'Nao informado'}\n` +
+      `📧 *E-mail:* ${extras.email || 'Nao informado'}\n` +
+      `📞 *Telefone:* ${extras.telefone || '-'}\n\n`
+    : '';
+  const mensagem = `🎉 *${extras ? 'Venda pronta para fechamento' : 'Novo interessado em comprar material fotografico'}!*\n\n` +
     `👤 *Nome:* ${nomeContato}\n` +
-    `📄 *Contrato:* ${dadosVenda?.numero_contrato || 'Nao informado'}\n\n` +
-    `💰 *Planos disponiveis:*\n${formatarPlanosDisponiveis(dadosVenda?.valor_oferecido || dadosVenda?.opcoes_plano)}\n\n` +
+    `📄 *Contrato:* ${dadosVenda?.numero_contrato || 'Nao informado'}\n` +
+    (qtdFotos ? `📸 *Fotos no acervo:* ${qtdFotos}\n` : '') +
+    `\n💰 *Planos disponiveis:*\n${formatarPlanosDisponiveis(dadosVenda?.valor_oferecido || dadosVenda?.opcoes_plano)}\n\n` +
     `✅ *Plano escolhido:* ${planoEscolhido || dadosVenda?.opcoes_plano || 'Nao especificado'}\n` +
     `💳 *Pagamento:* ${formaPagamentoEscolhida || dadosVenda?.formas_pagamento || 'Nao especificado'}\n\n` +
-    `👉 Acesse o sistema para enviar o link de pagamento.`;
+    blocoDadosConfirmados +
+    `👉 ${extras ? `Dados conferidos pelo formando. Envie o link de pagamento (prazo informado a ele: ate ${PRAZO_LINK_PAGAMENTO}).` : 'Acesse o sistema para enviar o link de pagamento.'}`;
 
   await enviarMensagemUazapi(NUMERO_VENDEDOR_MATERIAL, mensagem);
 
@@ -605,7 +765,12 @@ Valor promocional oferecido: ${valorOuPadrao(dadosVenda?.valor_oferecido)}
 Formas de pagamento disponiveis: ${dadosVenda?.formas_pagamento || 'consulte as opcoes disponiveis'}
 Opcoes de plano/parcelamento: ${dadosVenda?.opcoes_plano || 'consulte as opcoes disponiveis'}
 Prazo de reciclagem/perda do material: ${dadosVenda?.prazo_reciclagem || 'em breve'}
-Quantidade de fotos disponiveis no acervo: ${dadosVenda?.quantidade_fotos || 'nao informado'}
+Quantidade de fotos disponiveis no acervo: ${formatarQuantidadeFotos(dadosVenda?.quantidade_fotos) || 'nao informado'}
+
+## QUANTIDADE DE FOTOS (regra obrigatoria)
+${formatarQuantidadeFotos(dadosVenda?.quantidade_fotos)
+  ? `O acervo de ${nomeContato} possui EXATAMENTE ${formatarQuantidadeFotos(dadosVenda?.quantidade_fotos)} fotos. Sempre que o formando perguntar quantas fotos sao, o que vem no material ou como sao as fotos, responda com esse numero exato e diga que todas as fotos sao tratadas e entregues em alta resolucao (ex: "Seu acervo possui ${formatarQuantidadeFotos(dadosVenda?.quantidade_fotos)} fotos, todas tratadas e em alta resolucao."). NUNCA arredonde, estime ou invente outro numero.`
+  : `A quantidade de fotos deste contrato NAO foi informada. Se o formando perguntar, diga que todas as fotos sao tratadas e em alta resolucao e que voce vai confirmar a quantidade exata com a equipe. NUNCA invente um numero.`}
 
 Observacao importante: os campos de valor acima podem conter mais de uma opcao no mesmo
 texto (ex: "800,00 a vista ou no cartao em 6 parcelas de 200,00"). Quando isso acontecer,
@@ -643,9 +808,11 @@ valores reais informados acima, deixando claro qual e o total de cada opcao.
 
 ## REGRA CRITICA - VOCE NUNCA FECHA A VENDA SOZINHA
 Voce NUNCA envia link de pagamento e NUNCA fecha a venda sozinha. Seu papel termina quando
-o formando confirma verbalmente que quer comprar (ou pede o link/forma de pagamento). Nesse
-momento, agradeca, confirme o plano escolhido e informe que o time vai finalizar o pagamento
-com ele. Inclua OBRIGATORIAMENTE ao final da resposta o marcador tecnico exato:
+o formando deixa claro QUAL opcao quer (ex: "quero a opcao 1", "vou no pix", "pode ser a
+vista", "quero parcelado"). Nesse momento gere IMEDIATAMENTE o marcador abaixo, sem pedir
+"Combinado?" ou qualquer confirmacao extra: o sistema envia automaticamente a confirmacao da
+escolha, a conferencia de CPF/e-mail e o repasse para o especialista humano - entao voce NAO
+precisa escrever essa parte. Inclua OBRIGATORIAMENTE ao final da resposta o marcador tecnico exato:
 ###QUER_COMPRAR###{"plano_escolhido":"TEXTO_DO_PLANO","forma_pagamento_escolhida":"TEXTO_DA_FORMA"}###FIM###
 
 CRITICO SOBRE O CAMPO "plano_escolhido": coloque APENAS a opcao especifica que o formando
@@ -656,6 +823,12 @@ antes de gerar o marcador - nunca gere ###QUER_COMPRAR### com as duas opcoes mis
 
 Se o formando demonstrar que nao tem interesse, inclua: ###SEM_INTERESSE###
 Se precisar transferir para atendimento humano, inclua: ###OVERFLOW###
+
+## CONTINUIDADE DA CONVERSA
+Voce JA esta em atendimento com esse formando. NUNCA se reapresente ("Ola, meu nome e
+Sophia...") e NUNCA pergunte "Em que posso te ajudar?" no meio da conversa - isso passa
+inseguranca. Se a mensagem dele for curta ("sim", "ok", "sin"), interprete pelo que voce
+mesma perguntou na mensagem anterior e siga o fluxo.
 
 ${contextoAgendamento}
 
@@ -763,16 +936,30 @@ async function processarProximoBloco(sb: any, conversaId: string): Promise<void>
 
   // Se nao ha mais blocos
   if (blocoAtual >= blocos.length) {
-    await sb
-      .from('conversa_estado')
-      .update({ status: 'concluido', updated_at: new Date().toISOString() })
-      .eq('id', conversaId);
-    console.log(`[Processor] Conversa concluida para ${nome}`);
+    if (campanha.tipo_atendimento === 'venda_material') {
+      // Venda de material: a conversa continua sendo conduzida AQUI (prompt
+      // completo de vendas + quantidade de fotos + conferencia de CPF/e-mail),
+      // em vez de cair no fluxo generico do webhook.
+      await sb
+        .from('conversa_estado')
+        .update({ aguardando_resposta: true, status: 'aguardando_lead', updated_at: new Date().toISOString() })
+        .eq('id', conversaId);
+      console.log(`[Processor] Venda de material - aguardando proxima resposta de ${nome}`);
+    } else {
+      await sb
+        .from('conversa_estado')
+        .update({ status: 'concluido', updated_at: new Date().toISOString() })
+        .eq('id', conversaId);
+      console.log(`[Processor] Conversa concluida para ${nome}`);
+    }
+    // So promove para em_conversa quem ainda esta nas etapas iniciais (nao
+    // sobrescreve agendado / confirmando_dados / interessado_compra etc.)
     await sb
       .from('contatos_campanha')
       .update({ status: 'em_conversa' })
       .eq('campanha_id', campanha.id)
-      .eq('telefone', telefone);
+      .eq('telefone', telefone)
+      .in('status', ['aguardando_inicio', 'enviando', 'saudacao_enviada', 'sem_retorno']);
     return;
   }
 
@@ -1030,7 +1217,7 @@ serve(async (req) => {
       }
 
 case 'resposta_recebida': {
-  const { telefone, campanha_id, texto_resposta, message_type, media_url } = body;
+  const { telefone, campanha_id, texto_resposta, message_type, media_url, criar_conversa_se_ausente } = body;
   const tipoMensagemRecebida: string = message_type || 'text';
   const ehMidiaRecebida = tipoMensagemRecebida !== 'text';
 
@@ -1041,12 +1228,53 @@ case 'resposta_recebida': {
     });
   }
 
-  const { data: conversa } = await sb
-    .from('conversa_estado')
-    .select('*, campanhas(*)')
-    .eq('contato_telefone', telefone)
-    .eq('aguardando_resposta', true)
-    .maybeSingle();
+  // 1) Conversa da campanha informada (independe de aguardando_resposta)
+  let conversa: any = null;
+  if (campanha_id) {
+    const { data } = await sb
+      .from('conversa_estado')
+      .select('*, campanhas(*)')
+      .eq('contato_telefone', telefone)
+      .eq('campanha_id', campanha_id)
+      .maybeSingle();
+    conversa = data;
+  }
+  // 2) Qualquer conversa aguardando resposta (mais recente)
+  if (!conversa) {
+    const { data } = await sb
+      .from('conversa_estado')
+      .select('*, campanhas(*)')
+      .eq('contato_telefone', telefone)
+      .eq('aguardando_resposta', true)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    conversa = data;
+  }
+  // 3) Venda de material disparada pela fila (sem conversa_estado): cria uma
+  //    conversa ja "pos-abertura" para a IA de vendas assumir daqui pra frente
+  if (!conversa && campanha_id && criar_conversa_se_ausente) {
+    const { data: contatoNome } = await sb
+      .from('contatos_campanha')
+      .select('nome')
+      .eq('campanha_id', campanha_id)
+      .eq('telefone', telefone)
+      .maybeSingle();
+    const { data } = await sb
+      .from('conversa_estado')
+      .upsert({
+        campanha_id,
+        contato_telefone: telefone,
+        contato_nome: contatoNome?.nome || null,
+        bloco_atual: 9999,
+        aguardando_resposta: true,
+        status: 'aguardando_lead',
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'campanha_id,contato_telefone' })
+      .select('*, campanhas(*)')
+      .single();
+    conversa = data;
+  }
 
   if (!conversa) {
     console.log(`[Processor] Nenhuma conversa aguardando resposta para ${telefone}`);
@@ -1064,12 +1292,12 @@ case 'resposta_recebida': {
   // Busca dados completos do contato na campanha (nome, contrato, curso, endereco)
   const { data: contatoCampanhaData } = await sb
     .from('contatos_campanha')
-    .select('id, nome, numero_contrato, status, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos')
+    .select('id, nome, numero_contrato, status, curso, local, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos, cpf, email, plano_escolhido, forma_pagamento_escolhida, dados_confirmados_em')
     .eq('campanha_id', campanha.id)
     .eq('telefone', telefone)
     .maybeSingle();
 
-  const dadosContato = contatoCampanhaData || {};
+  const dadosContato: any = contatoCampanhaData || {};
   const nomeCompleto = dadosContato.nome || nome;
 
   // Busca ou cria contact_id (necessario para historico e agendamento)
@@ -1121,6 +1349,22 @@ case 'resposta_recebida': {
     });
   }
 
+  // Formando respondeu enquanto a mensagem de abertura (blocos com [esperar Xs])
+  // ainda esta sendo enviada: so registra a mensagem; a IA responde quando a
+  // abertura terminar e ele mandar a proxima mensagem (evita pular blocos).
+  const totalBlocosAbertura = parsearMensagem(campanha.mensagem_inicial || '').length;
+  if (
+    !conversa.aguardando_resposta &&
+    conversa.bloco_atual < totalBlocosAbertura &&
+    ['ativo', 'aguardando_tempo'].includes(conversa.status)
+  ) {
+    console.log(`[Processor] ${nome} respondeu durante a abertura - mensagem registrada, aguardando fim dos blocos`);
+    return new Response(JSON.stringify({ success: true, skipped: true, reason: 'abertura_em_andamento' }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+
   // A IA (Gemini, apenas texto) nao interpreta midia. Se o cliente mandou uma
   // FOTO durante uma venda de material fotografico com status de compra
   // confirmado, trata como comprovante de pagamento: encaminha pro vendedor
@@ -1166,12 +1410,15 @@ case 'resposta_recebida': {
   let history: Array<{ role: string; parts: Array<{ text: string }> }> = [];
   let textosFormando: string[] = [];
   if (contactId) {
-    const { data: mensagens } = await sb
+    // Pega as ULTIMAS 30 mensagens (antes pegava as 20 primeiras, e em conversas
+    // longas a IA perdia o contexto recente e se reapresentava)
+    const { data: mensagensDesc } = await sb
       .from('messages')
       .select('*')
       .eq('contact_id', contactId)
-      .order('created_at', { ascending: true })
-      .limit(20);
+      .order('created_at', { ascending: false })
+      .limit(30);
+    const mensagens = (mensagensDesc || []).slice().reverse();
 
     textosFormando = (mensagens || []).filter((m: any) => m.direction === 'in').map((m: any) => (m.content || '').toLowerCase());
 
@@ -1191,8 +1438,132 @@ case 'resposta_recebida': {
     }
   }
 
+  // ===================== VENDA: ETAPA DE CONFERENCIA DE CPF / E-MAIL =====================
+  const ehVendaMaterial = campanha.tipo_atendimento === 'venda_material';
+  const statusVendaAtual: string = dadosContato.status || '';
+  const vendaLegadoSemConferencia = ehVendaMaterial && statusVendaAtual === 'interessado_compra' && !dadosContato.dados_confirmados_em;
+  const emConferencia = ehVendaMaterial && !!dadosContato.id && (statusVendaAtual === 'confirmando_dados' || vendaLegadoSemConferencia);
+  let contextoConferencia = '';
+
+  // Envia uma resposta "fixa" (sem IA) dentro do fluxo de venda e grava tudo
+  const responderVenda = async (texto: string, encerrar: boolean) => {
+    const ok = await enviarMensagemUazapi(telefone, texto);
+    await logarEnvio(sb, campanha.id, telefone, ok);
+    if (ok && contactId) {
+      await sb.from('messages').insert({ contact_id: contactId, direction: 'out', content: texto, sent_by: 'ia', seq: 0 });
+    }
+    await sb
+      .from('conversa_estado')
+      .update(encerrar
+        ? { aguardando_resposta: false, status: 'concluido', updated_at: new Date().toISOString() }
+        : { aguardando_resposta: true, status: 'aguardando_lead', updated_at: new Date().toISOString() })
+      .eq('id', conversa.id);
+    return new Response(JSON.stringify({ success: true, resposta_gerada: true, etapa: 'conferencia_dados' }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  };
+
+  if (emConferencia) {
+    let cpfAtual = normalizarCPF(dadosContato.cpf);
+    let emailAtual = String(dadosContato.email || '').trim().toLowerCase();
+    const cpfMsg = extrairCPF(texto_resposta);
+    const emailMsg = extrairEmail(texto_resposta);
+
+    // Contato que confirmou a compra no fluxo antigo (sem conferencia): entra na etapa agora
+    if (vendaLegadoSemConferencia) {
+      await sb.from('contatos_campanha').update({ status: 'confirmando_dados' }).eq('id', dadosContato.id);
+      if (!cpfMsg && !emailMsg) {
+        return await responderVenda(
+          montarMensagemConferencia(nomeCompleto, dadosContato.plano_escolhido, dadosContato.forma_pagamento_escolhida, cpfAtual, emailAtual),
+          false
+        );
+      }
+    }
+
+    if (cpfMsg && !cpfValido(cpfMsg)) {
+      return await responderVenda(
+        'Hmm, esse CPF não parece estar correto. Pode conferir e me mandar de novo, por favor? 🙏',
+        false
+      );
+    }
+
+    let atualizou = false;
+    if (cpfMsg) { cpfAtual = cpfMsg; atualizou = true; }
+    if (emailMsg) { emailAtual = emailMsg; atualizou = true; }
+    if (atualizou) {
+      await sb
+        .from('contatos_campanha')
+        .update({ cpf: formatarCPF(cpfAtual) || null, email: emailAtual || null })
+        .eq('id', dadosContato.id);
+    }
+
+    const faltaCpf = !cpfValido(cpfAtual);
+    const faltaEmail = !emailValido(emailAtual);
+    const intencao = classificarConfirmacao(texto_resposta);
+
+    const finalizarVenda = async () => {
+      await sb
+        .from('contatos_campanha')
+        .update({
+          cpf: formatarCPF(cpfAtual),
+          email: emailAtual,
+          dados_confirmados_em: new Date().toISOString(),
+          status: 'interessado_compra',
+        })
+        .eq('id', dadosContato.id);
+
+      await notificarInteresseDeCompra(
+        sb,
+        dadosContato.id,
+        campanha.id,
+        nomeCompleto,
+        dadosContato as DadosVenda,
+        dadosContato.plano_escolhido || '',
+        dadosContato.forma_pagamento_escolhida || '',
+        { telefone, cpf: cpfAtual, email: emailAtual }
+      );
+
+      // Atendimento passa para o especialista humano (a IA para de responder)
+      if (contactId) {
+        await sb.from('contacts').update({ assigned_to: 'manual' }).eq('id', contactId);
+      }
+      console.log(`[Processor] ${nomeCompleto}: dados conferidos - venda repassada ao especialista`);
+
+      return await responderVenda(
+        montarMensagemRepasseHumano(nomeCompleto, dadosContato.plano_escolhido, dadosContato.forma_pagamento_escolhida, atualizou),
+        true
+      );
+    };
+
+    if (atualizou || intencao === 'sim') {
+      if (!faltaCpf && !faltaEmail) return await finalizarVenda();
+      const pn = primeiroNome(nomeCompleto);
+      return await responderVenda(
+        `${atualizou ? 'Obrigada! Já anotei aqui.' : `Certo${pn ? ', ' + pn : ''}!`} Pra concluir, só preciso que você me informe ${textoPedidoDadosFaltantes(faltaCpf, faltaEmail)}.`,
+        false
+      );
+    }
+
+    if (intencao === 'nao') {
+      return await responderVenda(
+        'Sem problema! Me mande por aqui o dado correto e atualizado (CPF e/ou e-mail) que eu já ajusto pra você.',
+        false
+      );
+    }
+
+    // Mensagem que nao e nem confirmacao nem dado novo (ex: uma duvida):
+    // a IA responde, mas presa a etapa de conferencia
+    contextoConferencia = `## ETAPA ATUAL - CONFERENCIA DE DADOS (regra prioritaria)
+O formando JA escolheu a opcao: ${descreverPlano(dadosContato.plano_escolhido, dadosContato.forma_pagamento_escolhida)}.
+Voce pediu para ele confirmar os dados para o envio do link de pagamento: CPF ${faltaCpf ? '(nao informado)' : cpfParaExibir(cpfAtual)} e e-mail ${faltaEmail ? '(nao informado)' : emailAtual}.
+Responda a mensagem dele em no maximo 2 frases curtas e, em seguida, peca novamente que confirme se o CPF e o e-mail estao corretos (ou que envie os dados corretos/faltantes).
+NAO gere ###QUER_COMPRAR### de novo, NAO se reapresente e NAO pergunte "em que posso ajudar".
+Se ele desistir da compra, inclua ###SEM_INTERESSE###. Se pedir para falar com uma pessoa ou demonstrar irritacao, inclua ###OVERFLOW###.`;
+  }
+
   // Se ja existe agendamento, reforca isso no prompt para a IA nao repetir a pergunta
-  let contextoAgendamento = '';
+  let contextoAgendamento = contextoConferencia;
   if (contactId) {
     const { data: agendamentoRecente } = await sb
       .from('appointments')
@@ -1202,7 +1573,7 @@ case 'resposta_recebida': {
       .limit(1)
       .maybeSingle();
 
-    if (agendamentoRecente) {
+    if (agendamentoRecente && !ehVendaMaterial) {
       contextoAgendamento = `ATENCAO - ESTADO ATUAL: Este formando JA TEM uma visita confirmada para ${agendamentoRecente.date} no turno ${agendamentoRecente.shift}, endereco ${agendamentoRecente.location || 'Nao informado'}. NAO reinicie a apresentacao nem ofereca novas datas. Se ele pedir explicitamente para mudar, trate como reagendamento dentro das opcoes validas.`;
     }
   }
@@ -1221,7 +1592,9 @@ case 'resposta_recebida': {
   );
 
   if (respostaIA) {
-    let novoStatus = 'em_conversa';
+    let novoStatus = emConferencia ? 'confirmando_dados' : 'em_conversa';
+    // Quando definido, substitui o texto da IA por uma mensagem padronizada do sistema
+    let respostaSistema: string | null = null;
 
     // TRAVA DE SEGURANCA: verificar se a etapa de confirmacao de endereco aconteceu
     let etapaEnderecoOk = false;
@@ -1359,7 +1732,7 @@ case 'resposta_recebida': {
     }
 
     // Processa intencao de compra confirmada (fluxo de venda de material apenas)
-    if (campanha.tipo_atendimento === 'venda_material' && respostaIA.includes('###QUER_COMPRAR###')) {
+    if (ehVendaMaterial && !emConferencia && respostaIA.includes('###QUER_COMPRAR###')) {
       let planoEscolhido = '';
       let formaPagamentoEscolhida = '';
       try {
@@ -1373,7 +1746,10 @@ case 'resposta_recebida': {
         console.error('[Processor] Falha ao parsear QUER_COMPRAR:', e);
       }
 
-      novoStatus = 'interessado_compra';
+      // Escolha feita: em vez de a IA "improvisar" o fechamento, o sistema
+      // confirma a opcao e ja pede a conferencia de CPF/e-mail. O vendedor so
+      // e notificado quando os dados estiverem conferidos (pronto pro link).
+      novoStatus = 'confirmando_dados';
 
       await sb
         .from('contatos_campanha')
@@ -1383,17 +1759,15 @@ case 'resposta_recebida': {
         })
         .eq('id', dadosContato.id);
 
-      await notificarInteresseDeCompra(
-        sb,
-        dadosContato.id,
-        campanha.id,
+      respostaSistema = montarMensagemConferencia(
         nomeCompleto,
-        dadosContato as DadosVenda,
         planoEscolhido,
-        formaPagamentoEscolhida
+        formaPagamentoEscolhida,
+        dadosContato.cpf,
+        dadosContato.email
       );
 
-      console.log(`[Processor] ${nomeCompleto} confirmou interesse de compra - Square notificado`);
+      console.log(`[Processor] ${nomeCompleto} escolheu a opcao (${planoEscolhido}) - iniciando conferencia de dados`);
     }
 
     if (respostaIA.includes('###SEM_INTERESSE###')) {
@@ -1407,14 +1781,16 @@ case 'resposta_recebida': {
       }
     }
 
-    const respostaLimpa = respostaIA
+    const respostaLimpa = respostaSistema ?? respostaIA
       .replace(/###AGENDAMENTO_CONFIRMADO###[\s\S]*?###FIM###/g, '')
       .replace(/###QUER_COMPRAR###[\s\S]*?###FIM###/g, '')
+      .replace(/###QUER_COMPRAR###/g, '')
+      .replace(/###FIM###/g, '')
       .replace(/###OVERFLOW###/g, '')
       .replace(/###SEM_INTERESSE###/g, '')
       .trim();
 
-    const sucesso = await enviarMensagemUazapi(telefone, respostaLimpa);
+    const sucesso = respostaLimpa ? await enviarMensagemUazapi(telefone, respostaLimpa) : false;
     await logarEnvio(sb, campanha.id, telefone, sucesso);
 
     if (sucesso) {
@@ -1429,22 +1805,30 @@ case 'resposta_recebida': {
       }
 
       await sb
-        .from('conversa_estado')
-        .update({
-          aguardando_resposta: false,
-          bloco_atual: conversa.bloco_atual + 1,
-          status: 'ativo',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', conversa.id);
-
-      await sb
         .from('contatos_campanha')
         .update({ status: novoStatus })
         .eq('campanha_id', campanha.id)
         .eq('telefone', telefone);
 
-      await processarProximoBloco(sb, conversa.id);
+      if (ehVendaMaterial && STATUS_VENDA_ENCERRADA.includes(novoStatus)) {
+        // Venda encerrada pela IA (sem interesse / transferido): fecha a conversa
+        await sb
+          .from('conversa_estado')
+          .update({ aguardando_resposta: false, status: 'concluido', updated_at: new Date().toISOString() })
+          .eq('id', conversa.id);
+      } else {
+        await sb
+          .from('conversa_estado')
+          .update({
+            aguardando_resposta: false,
+            bloco_atual: conversa.bloco_atual + 1,
+            status: 'ativo',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', conversa.id);
+
+        await processarProximoBloco(sb, conversa.id);
+      }
     }
   }
 
