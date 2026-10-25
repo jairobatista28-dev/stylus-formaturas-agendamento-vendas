@@ -168,7 +168,24 @@ class Sessao {
         if (tc) { this.authToken = tc; origem = `cookie ${nome}`; break; }
       }
     }
-    // 3) plano B: secret opcional
+    // 3) Cookie "user_offline" (criado pelo navegador depois do login e exigido
+    //    pelas paginas do site, como a de fotos). Vem do secret MEUSALBUNS_USER_OFFLINE.
+    const userOffline = Deno.env.get('MEUSALBUNS_USER_OFFLINE')?.trim();
+    if (userOffline) {
+      this.cookies.set('user_offline', userOffline);
+      if (!this.cookies.has('TokenF')) this.cookies.set('TokenF', '');
+      try {
+        const dados = JSON.parse(userOffline);
+        if (!this.authToken && dados?.Token) { this.authToken = String(dados.Token); origem = 'secret MEUSALBUNS_USER_OFFLINE'; }
+        this.log.push(`Cookie user_offline: configurado (conta ${dados?.Nickname || dados?.Name || '?'})`);
+      } catch {
+        this.log.push('Cookie user_offline: configurado, mas o valor nao e um JSON valido (confira o secret)');
+      }
+    } else {
+      this.log.push('Cookie user_offline: NAO configurado (crie o secret MEUSALBUNS_USER_OFFLINE)');
+    }
+
+    // 4) plano B do token: secret opcional
     if (!this.authToken) {
       const secreto = Deno.env.get('MEUSALBUNS_TOKEN')?.trim();
       if (secreto) { this.authToken = secreto; origem = 'secret MEUSALBUNS_TOKEN'; }
