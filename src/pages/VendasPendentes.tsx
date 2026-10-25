@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { CalendarClock, CheckCircle2, Copy, ExternalLink, ShoppingCart } from 'lucide-react';
+import { CalendarClock, CheckCircle2, Copy, ExternalLink, Image as ImageIcon, Send, ShoppingCart, X } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../hooks/useToast';
 import { ToastContainer } from '../components/Toast';
 import { ResgatePanel } from '../components/ResgatePanel';
 import { RetornosPanel, agendarRetornoManual } from '../components/RetornosPanel';
+import { FotosPanel, motivoFotoLegivel } from '../components/FotosPanel';
 
 interface VendaPendente {
   id: string;
@@ -21,6 +22,7 @@ interface VendaPendente {
   cpf: string | null;
   email: string | null;
   dados_confirmados_em: string | null;
+  foto_enviada_em: string | null;
   status: string;
   link_pagamento_enviado: boolean;
   atualizado_em: string;
@@ -46,6 +48,8 @@ export function VendasPendentes() {
   const [dataRetorno, setDataRetorno] = useState('');
   const [retornosPorContato, setRetornosPorContato] = useState<Record<string, string>>({});
   const [chaveRetornos, setChaveRetornos] = useState(0);
+  const [fotoCarregando, setFotoCarregando] = useState<string | null>(null);
+  const [previa, setPrevia] = useState<{ id: string; imagem: string; legenda: string } | null>(null);
 
   useEffect(() => {
     carregar();
@@ -56,7 +60,7 @@ export function VendasPendentes() {
     const { data, error } = await supabase
       .from('contatos_campanha')
       .select(
-        'id, nome, telefone, numero_contrato, valor_tabela, valor_oferecido, plano_escolhido, forma_pagamento_escolhida, formas_pagamento, opcoes_plano, quantidade_fotos, cpf, email, dados_confirmados_em, status, link_pagamento_enviado, atualizado_em, campanha_id'
+        'id, nome, telefone, numero_contrato, valor_tabela, valor_oferecido, plano_escolhido, forma_pagamento_escolhida, formas_pagamento, opcoes_plano, quantidade_fotos, cpf, email, dados_confirmados_em, foto_enviada_em, status, link_pagamento_enviado, atualizado_em, campanha_id'
       )
       .in('status', ['confirmando_dados', 'compra_futura', 'interessado_compra', 'comprou'])
       .order('atualizado_em', { ascending: false });
@@ -126,6 +130,41 @@ export function VendasPendentes() {
     }
   }
 
+  async function verFoto(v: VendaPendente) {
+    setFotoCarregando(v.id);
+    const { data, error } = await supabase.functions.invoke('fotos-formando', { body: { acao: 'previa', contato_campanha_id: v.id } });
+    setFotoCarregando(null);
+    if (error || !data) {
+      showToast('Erro ao buscar a foto', 'error');
+      return;
+    }
+    if (!data.success) {
+      showToast(motivoFotoLegivel(data.motivo), 'error');
+      return;
+    }
+    setPrevia({
+      id: v.id,
+      imagem: data.imagem,
+      legenda: `${data.aluno?.nome || v.nome} · turma ${data.aluno?.turma || '-'} · ${data.aluno?.fotos || '?'} fotos${data.motivo_escolha ? ` · ${data.motivo_escolha}` : ''}`,
+    });
+  }
+
+  async function enviarFoto(v: VendaPendente) {
+    if (v.foto_enviada_em && !window.confirm(`${v.nome} já recebeu uma foto. Enviar outra?`)) return;
+    setFotoCarregando(v.id);
+    const { data, error } = await supabase.functions.invoke('fotos-formando', {
+      body: { acao: 'enviar', contato_campanha_id: v.id, origem: 'manual', forcar: !!v.foto_enviada_em },
+    });
+    setFotoCarregando(null);
+    if (error || !data?.success) {
+      showToast(motivoFotoLegivel(data?.motivo) + (data?.erro ? ` (${data.erro})` : ''), 'error');
+      return;
+    }
+    showToast(`Foto enviada para ${v.nome}`, 'success');
+    setPrevia(null);
+    setVendas((atual) => atual.map((x) => (x.id === v.id ? { ...x, foto_enviada_em: new Date().toISOString() } : x)));
+  }
+
   function copiarTexto(texto: string, rotulo: string) {
     navigator.clipboard.writeText(texto);
     showToast(`${rotulo} copiado`, 'success');
@@ -157,6 +196,7 @@ export function VendasPendentes() {
         </div>
       </div>
 
+      <FotosPanel onToast={showToast} />
       <ResgatePanel onToast={showToast} />
       <RetornosPanel onToast={showToast} atualizarChave={chaveRetornos} />
 
@@ -320,6 +360,20 @@ export function VendasPendentes() {
 
               {v.status !== 'comprou' && (
                 <div className="flex flex-wrap items-center gap-2 mt-3 pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                  <button
+                    onClick={() => verFoto(v)}
+                    disabled={fotoCarregando === v.id}
+                    className="btn-secondary"
+                    style={{ padding: '6px 12px', fontSize: '12px' }}
+                    title="Busca no Meus Álbuns a foto que a IA escolheria (não envia nada)"
+                  >
+                    <ImageIcon size={14} /> {fotoCarregando === v.id ? 'Buscando...' : 'Ver foto'}
+                  </button>
+                  {v.foto_enviada_em && (
+                    <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      Foto enviada em {new Date(v.foto_enviada_em).toLocaleDateString('pt-BR')}
+                    </span>
+                  )}
                   {retornoAberto === v.id ? (
                     <>
                       <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Formando vai comprar em:</span>
@@ -350,6 +404,26 @@ export function VendasPendentes() {
                       <CalendarClock size={14} /> {retornosPorContato[v.id] ? 'Alterar retorno' : 'Agendar retorno'}
                     </button>
                   )}
+                </div>
+              )}
+
+              {previa?.id === v.id && (
+                <div className="mt-3 p-3 rounded-lg flex flex-col md:flex-row gap-3 items-start" style={{ backgroundColor: 'var(--bg-surface-raised)' }}>
+                  <img src={previa.imagem} alt="Prévia" style={{ maxHeight: 260, borderRadius: 8 }} />
+                  <div className="space-y-2">
+                    <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>{previa.legenda}</p>
+                    <div className="flex gap-2">
+                      <button onClick={() => enviarFoto(v)} disabled={fotoCarregando === v.id} className="btn-primary" style={{ padding: '6px 12px', fontSize: '12px' }}>
+                        <Send size={14} /> {fotoCarregando === v.id ? 'Enviando...' : 'Enviar foto ao formando'}
+                      </button>
+                      <button onClick={() => setPrevia(null)} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '12px' }}>
+                        <X size={14} /> Fechar
+                      </button>
+                    </div>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      A IA escolhe de novo na hora do envio (pode ser outra foto boa do mesmo formando).
+                    </p>
+                  </div>
                 </div>
               )}
 

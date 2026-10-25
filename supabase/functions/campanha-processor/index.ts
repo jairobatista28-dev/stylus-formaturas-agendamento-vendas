@@ -1302,7 +1302,7 @@ case 'resposta_recebida': {
   // Busca dados completos do contato na campanha (nome, contrato, curso, endereco)
   const { data: contatoCampanhaData } = await sb
     .from('contatos_campanha')
-    .select('id, nome, numero_contrato, status, curso, local, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos, cpf, email, plano_escolhido, forma_pagamento_escolhida, dados_confirmados_em, prazo_prorrogado, resgate_enviado_em')
+    .select('id, nome, numero_contrato, status, curso, local, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos, cpf, email, plano_escolhido, forma_pagamento_escolhida, dados_confirmados_em, prazo_prorrogado, resgate_enviado_em, foto_enviada_em')
     .eq('campanha_id', campanha.id)
     .eq('telefone', telefone)
     .maybeSingle();
@@ -1610,8 +1610,26 @@ Se ele quiser mudar a data, gere ###COMPRA_FUTURA### com a nova data.`;
     }
   }
 
+  // Foto do formando (Meus Albuns): a IA decide o momento, o sistema envia
+  let podeEnviarFoto = false;
+  let contextoFoto = '';
+  if (ehVendaMaterial && !emConferencia && dadosContato.id && !dadosContato.foto_enviada_em) {
+    const { data: cfgFotos } = await sb.from('resgate_config').select('fotos_ativas').eq('id', 1).maybeSingle();
+    podeEnviarFoto = !!cfgFotos?.fotos_ativas;
+    if (podeEnviarFoto) {
+      contextoFoto = `## FOTO DO FORMANDO (recurso de alto impacto - use UMA vez)
+O sistema consegue enviar ao formando uma foto dele(a) da formatura (previa com marca d'agua, em
+visualizacao unica). Inclua o marcador ###ENVIAR_FOTO### ao final da resposta UMA unica vez, no
+momento em que isso mais ajuda a venda: quando ele demonstrar interesse, perguntar valores ou
+quantas fotos sao, ou hesitar ("vou pensar", "esta caro", "agora nao da"). Nao use o marcador se
+ele estiver irritado, se disser que nao quer ou se pedir para parar.
+Nao descreva a foto nem diga que vai mandar: o sistema envia logo depois da sua mensagem, com a
+legenda certa. Continue a conversa normalmente.`;
+    }
+  }
+
   // Se ja existe agendamento, reforca isso no prompt para a IA nao repetir a pergunta
-  let contextoAgendamento = [contextoProrrogacao, contextoConferencia, contextoCompraFutura].filter(Boolean).join('\n\n');
+  let contextoAgendamento = [contextoProrrogacao, contextoConferencia, contextoCompraFutura, contextoFoto].filter(Boolean).join('\n\n');
   if (contactId) {
     const { data: agendamentoRecente } = await sb
       .from('appointments')
@@ -1886,12 +1904,35 @@ Se ele quiser mudar a data, gere ###COMPRA_FUTURA### com a nova data.`;
       .replace(/###QUER_COMPRAR###/g, '')
       .replace(/###COMPRA_FUTURA###[\s\S]*?###FIM###/g, '')
       .replace(/###COMPRA_FUTURA###/g, '')
+      .replace(/###ENVIAR_FOTO###/g, '')
       .replace(/###FIM###/g, '')
       .replace(/###OVERFLOW###/g, '')
       .replace(/###SEM_INTERESSE###/g, '')
       .trim();
 
     const sucesso = respostaLimpa ? await enviarMensagemUazapi(telefone, respostaLimpa) : false;
+
+    // Envia a foto do formando logo depois da mensagem (se a IA pediu e a venda segue ativa)
+    const statusQueBloqueiamFoto = ['sem_interesse', 'transferido_humano', 'confirmando_dados'];
+    if (
+      sucesso && podeEnviarFoto && respostaIA.includes('###ENVIAR_FOTO###') &&
+      !statusQueBloqueiamFoto.includes(novoStatus)
+    ) {
+      try {
+        const rf = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/fotos-formando`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+          },
+          body: JSON.stringify({ acao: 'enviar', contato_campanha_id: dadosContato.id, origem: 'ia' }),
+        });
+        const jf = await rf.json().catch(() => ({}));
+        console.log(`[Processor] Foto do formando ${nomeCompleto}:`, jf?.success ? 'enviada' : jf?.motivo);
+      } catch (e) {
+        console.error('[Processor] Erro ao enviar foto do formando:', e);
+      }
+    }
     await logarEnvio(sb, campanha.id, telefone, sucesso);
 
     if (sucesso) {

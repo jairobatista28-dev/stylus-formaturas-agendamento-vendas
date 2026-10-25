@@ -33,3 +33,6 @@ verify_jwt = false
 
 [functions.resgate-vendas]
 verify_jwt = false
+
+[functions.fotos-formando]
+verify_jwt = false
