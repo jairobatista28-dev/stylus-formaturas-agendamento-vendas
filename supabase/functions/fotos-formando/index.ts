@@ -407,47 +407,70 @@ function primeiroNome(nome?: string | null): string {
   return p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : '';
 }
 
+/** Token da conta (para validar o codigo de sincronizacao que roda no navegador) */
+function tokenDaConta(): string | null {
+  const uo = Deno.env.get('MEUSALBUNS_USER_OFFLINE')?.trim();
+  if (uo) {
+    try {
+      const t = JSON.parse(uo)?.Token;
+      if (t) return String(t);
+    } catch { /* ignora */ }
+  }
+  return Deno.env.get('MEUSALBUNS_TOKEN')?.trim() || null;
+}
+
+/**
+ * Prepara a foto usando as fotos SINCRONIZADAS pelo navegador (tabela
+ * meusalbuns_fotos). Nao depende do login no site: os enderecos das fotos
+ * (hash + token) abrem sem login.
+ */
 async function prepararFoto(sb: any, contatoCampanhaId: string) {
-  const sessao = new Sessao();
+  const log: string[] = [];
   const { data: cc } = await sb
     .from('contatos_campanha')
     .select('id, nome, telefone, numero_contrato, status, foto_enviada_em, meusalbuns_aluno')
     .eq('id', contatoCampanhaId)
     .maybeSingle();
-  if (!cc) return { ok: false, motivo: 'contato_nao_encontrado', log: sessao.log };
+  if (!cc) return { ok: false, motivo: 'contato_nao_encontrado', log };
 
-  if (!(await sessao.login())) return { ok: false, motivo: 'login_falhou', log: sessao.log, cc };
+  const pit = String(cc.numero_contrato || '').replace(/\D/g, '');
+  const consulta = sb.from('meusalbuns_fotos').select('aluno_cript, nome_aluno, pit, qtd_fotos, token_foto, fotos, atualizado_em');
+  const { data: linhas } = pit ? await consulta.eq('pit', pit) : await consulta.limit(5000);
+  log.push(`Alunos sincronizados ${pit ? `na turma ${pit}` : '(todas as turmas)'}: ${linhas?.length || 0}`);
+  if (!linhas || !linhas.length) return { ok: false, motivo: 'turma_nao_sincronizada', log, cc };
 
-  let alunos = await listarAlunos(sb, sessao);
-  let achado = encontrarAluno(alunos, cc.nome, cc.numero_contrato);
-  if (!achado.aluno) {
-    // Pode ser aluno novo: renova o cache uma vez
-    alunos = await listarAlunos(sb, sessao, true);
-    achado = encontrarAluno(alunos, cc.nome, cc.numero_contrato);
-  }
-  if (!achado.aluno) return { ok: false, motivo: achado.motivo, log: sessao.log, cc };
+  const alunos: AlunoMA[] = linhas.map((l: any) => ({
+    NomeAluno: l.nome_aluno,
+    PIT: l.pit,
+    QtdFotos: l.qtd_fotos,
+    AlunoTurmaID: 0,
+    AlunoTurmaID_Cript: l.aluno_cript,
+  }));
+  const achado = encontrarAluno(alunos, cc.nome, cc.numero_contrato);
+  if (!achado.aluno) return { ok: false, motivo: achado.motivo, log, cc };
   const aluno = achado.aluno;
-  sessao.log.push(`Aluno: ${aluno.NomeAluno} (turma ${aluno.PIT}, ${aluno.QtdFotos} fotos)`);
+  const linha = linhas.find((l: any) => l.aluno_cript === aluno.AlunoTurmaID_Cript);
+  log.push(`Aluno: ${aluno.NomeAluno} (turma ${aluno.PIT}, ${aluno.QtdFotos} fotos, sincronizado em ${new Date(linha.atualizado_em).toLocaleDateString('pt-BR')})`);
 
-  const { fotos, token, urlRender } = await carregarFotos(sessao, aluno);
-  if (!fotos.length || !token) return { ok: false, motivo: 'fotos_indisponiveis', log: sessao.log, cc, aluno };
+  const fotos: FotoMA[] = (linha.fotos || []).map((f: any) => ({ RenderMain: f.h, Width: f.w, Height: f.a, FlBrinde: false }));
+  if (!fotos.length) return { ok: false, motivo: 'fotos_indisponiveis', log, cc, aluno };
 
   const candidatas = selecionarCandidatas(fotos);
   const baixadas: Array<{ foto: FotoMA; base64: string; url: string }> = [];
   for (const f of candidatas) {
-    const img = await baixarImagem(urlDaFoto(urlRender, f, token));
+    const img = await baixarImagem(urlDaFoto(`${BASE}/ImageFormatura`, f, linha.token_foto));
     if (img) baixadas.push({ foto: f, base64: img.base64, url: img.finalUrl });
   }
-  sessao.log.push(`Candidatas baixadas: ${baixadas.length}/${candidatas.length}`);
-  if (!baixadas.length) return { ok: false, motivo: 'download_falhou', log: sessao.log, cc, aluno };
+  log.push(`Candidatas baixadas: ${baixadas.length}/${candidatas.length}`);
+  if (!baixadas.length) return { ok: false, motivo: 'fotos_indisponiveis', log, cc, aluno };
 
   const escolha = await escolherMelhor(baixadas.map((b) => b.base64), aluno.NomeAluno);
-  if (escolha.indice === -1) return { ok: false, motivo: 'nenhuma_foto_adequada', log: sessao.log, cc, aluno };
+  if (escolha.indice === -1) return { ok: false, motivo: 'nenhuma_foto_adequada', log, cc, aluno };
   const melhor = baixadas[escolha.indice] || baixadas[0];
-  sessao.log.push(`Escolhida: ${escolha.indice} (${escolha.motivo})`);
+  log.push(`Escolhida: ${escolha.indice} (${escolha.motivo})`);
 
   await sb.from('contatos_campanha').update({ meusalbuns_aluno: aluno.AlunoTurmaID_Cript }).eq('id', cc.id);
-  return { ok: true, log: sessao.log, cc, aluno, foto: melhor, motivoEscolha: escolha.motivo };
+  return { ok: true, log, cc, aluno, foto: melhor, motivoEscolha: escolha.motivo };
 }
 
 async function enviarImagemUazapi(telefone: string, base64: string, legenda: string, viewOnce: boolean): Promise<{ ok: boolean; erro?: string }> {
@@ -483,6 +506,53 @@ serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const acao = body?.acao;
+
+    // ---------- Sincronizacao feita pelo navegador logado no Meus Albuns ----------
+    if (acao === 'pits_necessarios' || acao === 'sincronizar') {
+      const esperado = tokenDaConta();
+      if (!esperado || body.token_conta !== esperado) {
+        return json({ success: false, motivo: 'token_invalido' }, 403);
+      }
+    }
+
+    if (acao === 'pits_necessarios') {
+      // Turmas (contratos) das campanhas de venda com formandos que ainda nao compraram
+      const { data: ccs } = await sb
+        .from('contatos_campanha')
+        .select('numero_contrato, status, campanhas!inner(tipo_atendimento)')
+        .eq('campanhas.tipo_atendimento', 'venda_material')
+        .not('status', 'in', '("comprou","sem_interesse")');
+      const pits = [...new Set((ccs || []).map((c: any) => String(c.numero_contrato || '').replace(/\D/g, '')).filter(Boolean))];
+      const limite = new Date(Date.now() - (body.forcar ? 0 : 15) * 86400000).toISOString();
+      const { data: recentes } = await sb.from('meusalbuns_fotos').select('aluno_cript').gte('atualizado_em', limite);
+      return json({ success: true, pits, sincronizados: (recentes || []).map((r: any) => r.aluno_cript) });
+    }
+
+    if (acao === 'sincronizar') {
+      const lista = Array.isArray(body.alunos) ? body.alunos.slice(0, 50) : [];
+      const linhas = lista
+        .filter((a: any) => a?.cript && a?.token && Array.isArray(a?.fotos))
+        .map((a: any) => ({
+          aluno_cript: String(a.cript),
+          nome_aluno: String(a.nome || ''),
+          pit: String(a.pit || ''),
+          qtd_fotos: Number(a.qtd) || null,
+          token_foto: String(a.token),
+          fotos: a.fotos.slice(0, 20).map((f: any) => ({ h: String(f.h), w: Number(f.w) || 0, a: Number(f.a) || 0 })),
+          atualizado_em: new Date().toISOString(),
+        }));
+      if (linhas.length) {
+        const { error } = await sb.from('meusalbuns_fotos').upsert(linhas, { onConflict: 'aluno_cript' });
+        if (error) return json({ success: false, motivo: error.message }, 500);
+      }
+      return json({ success: true, gravados: linhas.length });
+    }
+
+    if (acao === 'status_sync') {
+      const { count } = await sb.from('meusalbuns_fotos').select('aluno_cript', { count: 'exact', head: true });
+      const { data: ultima } = await sb.from('meusalbuns_fotos').select('atualizado_em').order('atualizado_em', { ascending: false }).limit(1).maybeSingle();
+      return json({ success: true, total: count || 0, ultima: ultima?.atualizado_em || null });
+    }
 
     // Teste de conexao: login + lista de alunos (nao envia nada)
     if (acao === 'testar') {
