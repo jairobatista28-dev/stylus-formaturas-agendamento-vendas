@@ -169,11 +169,25 @@ export function Appointments() {
 
   const fetchAppointments = async () => {
     setIsLoading(true);
-    const { data, error } = await supabase
-      .from('appointments')
-      .select('*')
-      .order('date', { ascending: false });
-    if (!error && data) setAppointments(data as DBAppointment[]);
+    // Busca em paginas de 1000 (o Supabase corta em 1000 linhas por consulta;
+    // sem isso, agendamentos novos podiam nao aparecer na lista)
+    const todos: DBAppointment[] = [];
+    const PAGINA = 1000;
+    for (let inicio = 0; inicio < 50000; inicio += PAGINA) {
+      const { data, error } = await supabase
+        .from('appointments')
+        .select('*')
+        .order('date', { ascending: false })
+        .order('created_at', { ascending: false })
+        .range(inicio, inicio + PAGINA - 1);
+      if (error) {
+        console.error('[Agendamentos] Erro ao carregar:', error);
+        break;
+      }
+      todos.push(...((data || []) as DBAppointment[]));
+      if (!data || data.length < PAGINA) break;
+    }
+    setAppointments(todos);
     setIsLoading(false);
   };
 

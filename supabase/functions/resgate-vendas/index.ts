@@ -469,10 +469,42 @@ async function enviarPendentes(sb: any, cfg: Config): Promise<number> {
       updated_at: agoraISO,
     }, { onConflict: 'campanha_id,contato_telefone' });
 
+    // Foto do formando junto com o aviso de prorrogacao (gera mais impacto).
+    // Se ja recebeu foto antes, manda OUTRA foto do acervo.
+    await enviarFotoDoFormando(envio.contato_campanha_id, montarLegendaFotoResgate(cc, prazo, cfg.fuso));
+
     enviados++;
     console.log(`[Resgate] Enviado para ${envio.nome} (variante ${envio.variante})`);
   }
   return enviados;
+}
+
+/** Legenda da foto enviada junto com a mensagem de prorrogacao */
+function montarLegendaFotoResgate(cc: any, prazo: Date, fuso: string): string {
+  const pn = primeiroNome(cc?.nome);
+  const qtd = String(cc?.quantidade_fotos || '').trim();
+  const fotos = /^\d+$/.test(qtd) ? `uma das suas ${Number(qtd).toLocaleString('pt-BR')} fotos` : 'uma das suas fotos';
+  return `${pn ? pn + ', essa' : 'Essa'} é ${fotos} da formatura 📸 Ela está reservada pra você até ${textoPrazo(prazo, fuso)}.`;
+}
+
+/** Pede a Edge Function fotos-formando para enviar a foto (outra, se ja recebeu) */
+async function enviarFotoDoFormando(contatoCampanhaId: string, legenda: string): Promise<void> {
+  try {
+    // Pequena pausa para a foto chegar depois do texto
+    await new Promise((r) => setTimeout(r, 4000));
+    const res = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/fotos-formando`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+      },
+      body: JSON.stringify({ acao: 'enviar', contato_campanha_id: contatoCampanhaId, origem: 'resgate', forcar: true, legenda }),
+    });
+    const j = await res.json().catch(() => ({}));
+    console.log('[Resgate] Foto do formando:', j?.success ? 'enviada' : j?.motivo);
+  } catch (e) {
+    console.error('[Resgate] Erro ao enviar foto do formando:', e);
+  }
 }
 
 // ============================================================================

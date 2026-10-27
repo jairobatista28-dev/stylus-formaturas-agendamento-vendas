@@ -24,7 +24,41 @@ import { ToastContainer } from '../components/Toast';
 import { WhatsAppConnection } from '../components/WhatsAppConnection';
 import type { Contact, Message, MessageTemplate, AppSettings } from '../types';
 
-type ContactFilter = 'todos' | 'ia' | 'manual' | 'aguarda' | 'vendas' | 'notas';
+type ContactFilter = 'todos' | 'ia' | 'manual' | 'aguarda' | 'vendas' | 'agendados' | 'notas';
+
+const FILTER_LABELS: Record<ContactFilter, string> = {
+  todos: 'Todos',
+  ia: 'IA',
+  manual: 'Manual',
+  aguarda: 'Aguarda',
+  vendas: 'Vendas',
+  agendados: 'AG',
+  notas: 'Notas',
+};
+
+// Cores padrao das marcacoes na lista de conversas
+const COR_AG = '#22C55E'; // Agendado (verde)
+const COR_VD = '#3B82F6'; // Vendido (azul)
+
+type CampanhaInfo = {
+  id: string;
+  numero_contrato: string | null;
+  curso: string | null;
+  tipo_atendimento?: string;
+  status?: string;
+  valor_tabela?: number | null;
+  valor_oferecido?: number | null;
+  plano_escolhido?: string | null;
+  forma_pagamento_escolhida?: string | null;
+  formas_pagamento?: string | null;
+};
+
+/** Divide uma lista em blocos (evita URL gigante e o limite de 1000 linhas do Supabase) */
+function emBlocos<T>(lista: T[], tamanho = 150): T[][] {
+  const blocos: T[][] = [];
+  for (let i = 0; i < lista.length; i += tamanho) blocos.push(lista.slice(i, i + tamanho));
+  return blocos;
+}
 
 interface ContactWithLastMsg extends Contact {
   lastMessage?: Message;
@@ -87,6 +121,14 @@ const messagesContainerRef = useRef<HTMLDivElement>(null);
 const shouldAutoScrollRef = useRef(true);
 const lastMessageIdRef = useRef<string | null>(null);
   const realtimeConnectedRef = useRef(false);
+  // Agendamentos e dados de campanha (marcacoes AG / VD): recarregados a cada 20s
+  // no polling, ou na hora quando forcado (ex: depois de criar um agendamento)
+  const dadosLateraisRef = useRef<{
+    em: number;
+    ids: number;
+    agendamentos: Map<string, { date: string; shift: string; status: string }>;
+    campanhas: Map<string, CampanhaInfo>;
+  } | null>(null);
   const selectedContactRef = useRef<ContactWithLastMsg | null>(null);
   const { toasts, showToast, removeToast } = useToast();
 
@@ -357,7 +399,7 @@ const lastMessageIdRef = useRef<string | null>(null);
   }
 }, [messages]);
 
-const fetchContacts = async (silent = false) => {
+const fetchContacts = async (silent = false, forcarLaterais = false) => {
   if (!silent) setIsInitialLoading(true);
   try {
     const { data: contactsData, error } = await supabase
@@ -379,54 +421,91 @@ const fetchContacts = async (silent = false) => {
         console.error('[WhatsApp] Erro ao buscar ultimas mensagens:', lastMessagesError);
       }
 
-      const { data: allAppointments } = await supabase
-        .from('appointments')
-        .select('contact_id, date, shift, status')
-        .in('contact_id', contactIds)
-        .order('created_at', { ascending: false });
+      const cache = dadosLateraisRef.current;
+      const precisaRecarregar =
+        !silent || forcarLaterais || !cache || cache.ids !== contactIds.length || Date.now() - cache.em > 20000;
+
+      let lastAptByContact = cache?.agendamentos || new Map<string, { date: string; shift: string; status: string }>();
+      let campanhaByPhone = cache?.campanhas || new Map<string, CampanhaInfo>();
+
+      if (precisaRecarregar) {
+        // Agendamentos: busca em blocos de contatos (antes era uma consulta so com
+        // todos os IDs na URL, que passava do limite e falhava em silencio -
+        // por isso a marcacao de agendado tinha sumido)
+        const novosAgendamentos = new Map<string, { date: string; shift: string; status: string; created_at?: string }>();
+        const respostasApt = await Promise.all(
+          emBlocos(contactIds).map((bloco) =>
+            supabase
+              .from('appointments')
+              .select('contact_id, date, shift, status, created_at')
+              .in('contact_id', bloco)
+              .order('created_at', { ascending: false })
+          )
+        );
+        let falhouApt = false;
+        respostasApt.forEach(({ data, error: errApt }) => {
+          if (errApt) {
+            falhouApt = true;
+            console.error('[WhatsApp] Erro ao buscar agendamentos:', errApt);
+          }
+          (data || []).forEach((a: any) => {
+            const atual = novosAgendamentos.get(a.contact_id);
+            if (!atual || String(a.created_at) > String(atual.created_at)) novosAgendamentos.set(a.contact_id, a);
+          });
+        });
+
+        // Dados de campanha pelo telefone (contrato, curso, venda)
+        const contactPhones = (contactsData as Contact[]).map((c) => c.phone).filter(Boolean);
+        const novasCampanhas = new Map<string, CampanhaInfo>();
+        const respostasCamp = await Promise.all(
+          emBlocos(contactPhones).map((bloco) =>
+            supabase
+              .from('contatos_campanha')
+              .select('id, telefone, numero_contrato, curso, status, valor_tabela, valor_oferecido, plano_escolhido, forma_pagamento_escolhida, formas_pagamento, campanhas(tipo_atendimento)')
+              .in('telefone', bloco)
+          )
+        );
+        let falhouCamp = false;
+        respostasCamp.forEach(({ data, error: errCamp }) => {
+          if (errCamp) {
+            falhouCamp = true;
+            console.error('[WhatsApp] Erro ao buscar dados de campanha:', errCamp);
+          }
+          (data || []).forEach((cc: any) => {
+            const info: CampanhaInfo = {
+              id: cc.id,
+              numero_contrato: cc.numero_contrato,
+              curso: cc.curso,
+              tipo_atendimento: cc.campanhas?.tipo_atendimento,
+              status: cc.status,
+              valor_tabela: cc.valor_tabela,
+              valor_oferecido: cc.valor_oferecido,
+              plano_escolhido: cc.plano_escolhido,
+              forma_pagamento_escolhida: cc.forma_pagamento_escolhida,
+              formas_pagamento: cc.formas_pagamento,
+            };
+            const atual = novasCampanhas.get(cc.telefone);
+            // Mesmo telefone em mais de uma campanha: o registro VENDIDO prevalece
+            if (!atual || (info.status === 'comprou' && atual.status !== 'comprou')) {
+              novasCampanhas.set(cc.telefone, info);
+            }
+          });
+        });
+
+        // Se uma consulta falhar, mantem os dados anteriores (nao some com as marcacoes)
+        if (!falhouApt || !cache) lastAptByContact = novosAgendamentos;
+        if (!falhouCamp || !cache) campanhaByPhone = novasCampanhas;
+        dadosLateraisRef.current = {
+          em: Date.now(),
+          ids: contactIds.length,
+          agendamentos: lastAptByContact,
+          campanhas: campanhaByPhone,
+        };
+      }
 
       const lastMsgByContact = new Map<string, Message>();
       (lastMessages || []).forEach((m: Message) => {
         lastMsgByContact.set(m.contact_id, m);
-      });
-
-      const lastAptByContact = new Map<string, { date: string; shift: string; status: string }>();
-      (allAppointments || []).forEach((a) => {
-        if (!lastAptByContact.has(a.contact_id)) lastAptByContact.set(a.contact_id, a);
-      });
-
-      // Busca dados de contrato e curso na tabela contatos_campanha pelo telefone
-      const contactPhones = (contactsData as Contact[]).map((c) => c.phone);
-      const { data: campanhaContatos } = await supabase
-        .from('contatos_campanha')
-        .select('id, telefone, numero_contrato, curso, status, valor_tabela, valor_oferecido, plano_escolhido, forma_pagamento_escolhida, formas_pagamento, campanhas(tipo_atendimento)')
-        .in('telefone', contactPhones);
-
-      const campanhaByPhone = new Map<string, {
-        id: string;
-        numero_contrato: string | null;
-        curso: string | null;
-        tipo_atendimento?: string;
-        status?: string;
-        valor_tabela?: number | null;
-        valor_oferecido?: number | null;
-        plano_escolhido?: string | null;
-        forma_pagamento_escolhida?: string | null;
-        formas_pagamento?: string | null;
-      }>();
-      (campanhaContatos || []).forEach((cc: any) => {
-        campanhaByPhone.set(cc.telefone, {
-          id: cc.id,
-          numero_contrato: cc.numero_contrato,
-          curso: cc.curso,
-          tipo_atendimento: cc.campanhas?.tipo_atendimento,
-          status: cc.status,
-          valor_tabela: cc.valor_tabela,
-          valor_oferecido: cc.valor_oferecido,
-          plano_escolhido: cc.plano_escolhido,
-          forma_pagamento_escolhida: cc.forma_pagamento_escolhida,
-          formas_pagamento: cc.formas_pagamento,
-        });
       });
 
       const contactsWithMsgs = (contactsData as Contact[]).map((contact) => {
@@ -574,6 +653,7 @@ const fetchContacts = async (silent = false) => {
         (contactFilter === 'manual' && c.assigned_to === 'manual') ||
         (contactFilter === 'aguarda' && c.status === 'lead') ||
         (contactFilter === 'vendas' && c.tipo_atendimento_campanha === 'venda_material') ||
+        (contactFilter === 'agendados' && !!c.lastAppointment) ||
         (contactFilter === 'notas' && !!c.observacao);
 
     const matchesSearch =
@@ -979,17 +1059,18 @@ const formatTime = (dateStr: string) => {
           >
             <div className="p-3 space-y-2">
               <div className="flex gap-1 items-center">
-                {(['todos', 'ia', 'manual', 'aguarda', 'vendas', 'notas'] as ContactFilter[]).map((f) => (
+                {(['todos', 'ia', 'manual', 'aguarda', 'vendas', 'agendados', 'notas'] as ContactFilter[]).map((f) => (
                   <button
                     key={f}
                     onClick={() => setContactFilter(f)}
-                    className="flex-1 py-1.5 text-xs font-medium rounded-md transition-colors"
+                    title={f === 'agendados' ? 'Agendados' : undefined}
+                    className="flex-1 py-1.5 text-[11px] font-medium rounded-md transition-colors"
                     style={{
                       backgroundColor: contactFilter === f ? 'var(--bg-surface-raised)' : 'transparent',
                       color: contactFilter === f ? 'var(--text-primary)' : 'var(--text-muted)',
                     }}
                   >
-                    {f.charAt(0).toUpperCase() + f.slice(1)}
+                    {FILTER_LABELS[f]}
                   </button>
                 ))}
                 <button
@@ -1064,17 +1145,6 @@ const formatTime = (dateStr: string) => {
                             >
                               {contact.name || 'Sem nome'}
                             </span>
-                            {contact.lastAppointment && (
-                              <span className="flex items-center gap-0.5 flex-shrink-0" style={{ fontSize: '9px', color: '#22C55E' }}>
-                                <CheckCircle2 size={12} style={{ color: '#22C55E' }} />
-                                {(() => {
-                                  const parts = contact.lastAppointment!.date.split('-');
-                                  const dataFmt = parts.length === 3 ? `${parts[2]}/${parts[1]}` : contact.lastAppointment!.date;
-                                  const shiftCap = contact.lastAppointment!.shift.charAt(0).toUpperCase() + contact.lastAppointment!.shift.slice(1);
-                                  return `${dataFmt} · ${shiftCap}`;
-                                })()}
-                              </span>
-                            )}
                             <div className="flex items-center gap-2">
                               {hasUnread && (
                                 <span
@@ -1087,18 +1157,38 @@ const formatTime = (dateStr: string) => {
                                   {contact.unread_count}
                                 </span>
                               )}
+                              {contact.lastAppointment && (
+                                <span
+                                  className="badge flex-shrink-0"
+                                  title={(() => {
+                                    const parts = contact.lastAppointment!.date.split('-');
+                                    const dataFmt = parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : contact.lastAppointment!.date;
+                                    return `Agendado: ${dataFmt}${contact.lastAppointment!.shift ? ' · ' + contact.lastAppointment!.shift : ''}`;
+                                  })()}
+                                  style={{
+                                    backgroundColor: COR_AG,
+                                    color: 'white',
+                                    fontSize: '9px',
+                                    fontWeight: 700,
+                                    padding: '2px 6px',
+                                  }}
+                                >
+                                  AG
+                                </span>
+                              )}
                               {isSold && (
                                 <span
                                   className="badge flex-shrink-0"
                                   title="Vendido"
                                   style={{
-                                    backgroundColor: '#22C55E',
+                                    backgroundColor: COR_VD,
                                     color: 'white',
                                     fontSize: '9px',
+                                    fontWeight: 700,
                                     padding: '2px 6px',
                                   }}
                                 >
-                                  Vendido
+                                  VD
                                 </span>
                               )}
                               {!!contact.observacao && (
@@ -1189,8 +1279,21 @@ const formatTime = (dateStr: string) => {
                           )}
                         </div>
                       )}
+                      {selectedContact.lastAppointment && (
+                        <div className="flex items-center gap-1.5 text-[11px]" style={{ color: COR_AG }}>
+                          <span className="badge" style={{ backgroundColor: COR_AG, color: 'white', fontSize: '9px', fontWeight: 700, padding: '1px 5px' }}>AG</span>
+                          <span>
+                            Agendado
+                            {(() => {
+                              const parts = selectedContact.lastAppointment!.date.split('-');
+                              const dataFmt = parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : selectedContact.lastAppointment!.date;
+                              return ` · ${dataFmt}${selectedContact.lastAppointment!.shift ? ' · ' + selectedContact.lastAppointment!.shift : ''}`;
+                            })()}
+                          </span>
+                        </div>
+                      )}
                       {selectedContact.vendaProdutoConcluida && (
-                        <div className="flex items-center gap-1.5 text-[11px]" style={{ color: '#22C55E' }}>
+                        <div className="flex items-center gap-1.5 text-[11px]" style={{ color: COR_VD }}>
                           <CheckCircle2 size={11} />
                           <span>
                             Vendido
@@ -1226,7 +1329,7 @@ const formatTime = (dateStr: string) => {
                       <button
                         onClick={handleMarkAsSold}
                         className="btn-secondary"
-                        style={{ padding: '6px 10px', fontSize: '11px', backgroundColor: '#22C55E', color: 'white' }}
+                        style={{ padding: '6px 10px', fontSize: '11px', backgroundColor: COR_VD, color: 'white' }}
                       >
                         <CheckCircle2 size={12} />
                         Vendido
@@ -1769,7 +1872,7 @@ const formatTime = (dateStr: string) => {
                     status: 'scheduled',
                     notes: '',
                   });
-                  fetchContacts(true);
+                  fetchContacts(true, true);
                 }
               }}
               className="space-y-3"

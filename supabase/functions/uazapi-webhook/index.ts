@@ -535,13 +535,10 @@ async function executarFluxoIaPadrao(
           const dataValidada = validarDataHorarioMencionado(dados.data, horarioOuTurno, textosFormandoSaaS, []);
 
           if (!dataValidada) {
-            console.error('[SaaS] ALERTA: IA tentou confirmar agendamento sem validacao — data/horario nao encontrado nas mensagens do formando. contact_id:', contato.id, 'dados:', dados);
-
+            console.error('[SaaS] ALERTA: data/horario nao encontrado nas mensagens do formando - registrado para conferencia. contact_id:', contato.id, 'dados:', dados);
             await sb.from('contacts').update({ revisao_humana: true }).eq('id', contato.id);
-            console.log(`[SaaS] Contato ${contato.id} marcado para revisao humana — possivel agendamento nao confirmado pelo cliente`);
-          } else {
-
-          await sb.from('appointments').insert({
+          }
+          const ok = await inserirAgendamento(sb, {
             graduand_name: contato.name || 'Formando',
             contract_number: contato.contract_number || 'Nao Informado',
             course: contato.course || 'Outros',
@@ -551,9 +548,9 @@ async function executarFluxoIaPadrao(
             status: 'Em negociacao',
             contact_id: contato.id,
             seller_name: 'INDEFINIDO',
-          });
-          console.log(`[SaaS] Agendamento inserido para: ${contato.name}`);
-          }
+            notes: dataValidada ? null : 'CONFERIR: a IA confirmou, mas a data/turno nao aparece claramente nas mensagens do formando.',
+          }, {});
+          if (ok) console.log(`[SaaS] Agendamento inserido para: ${contato.name}`);
         }
       }
     } catch (e) {
@@ -584,6 +581,34 @@ async function executarFluxoIaPadrao(
  * Valida se a data e horario/turno confirmados pela IA realmente aparecem
  * nas mensagens enviadas pelo formando. Comparacao simples de texto.
  */
+/**
+ * Insere o agendamento sem falhar: tenta com o vinculo da campanha e, se o
+ * banco recusar (chaves estrangeiras antigas apontam para outras tabelas),
+ * tenta de novo sem o vinculo e, por fim, so com os campos essenciais.
+ */
+async function inserirAgendamento(sb: any, base: Record<string, unknown>, vinculo: Record<string, unknown>): Promise<boolean> {
+  const tentativas: Record<string, unknown>[] = [
+    { ...base, ...vinculo },
+    { ...base },
+    {
+      graduand_name: base.graduand_name,
+      contract_number: base.contract_number,
+      course: base.course,
+      date: base.date,
+      shift: base.shift,
+      location: base.location,
+      status: base.status,
+      contact_id: base.contact_id,
+    },
+  ];
+  for (const [i, dados] of tentativas.entries()) {
+    const { error } = await sb.from('appointments').insert(dados);
+    if (!error) return true;
+    console.error(`[Agendamento] Tentativa ${i + 1} falhou:`, JSON.stringify(error));
+  }
+  return false;
+}
+
 function validarDataHorarioMencionado(
   data: string,
   horarioOuTurno: string,
@@ -840,40 +865,28 @@ async function executarFluxoCampanha(
           const dataValidada = validarDataHorarioMencionado(dadosAgendamento.data, horarioOuTurno, textosFormando, campanha?.opcoes_agendamento || []);
 
           if (!dataValidada) {
-            console.error('[Campanha] ALERTA: IA tentou confirmar agendamento sem validacao — data/horario nao encontrado nas mensagens do formando. contact_id:', contactId, 'dados:', dadosAgendamento);
-
-            await sb
-              .from('contatos_campanha')
-              .update({ revisao_humana: true })
-              .eq('id', contatoCampanha.id);
-
+            // Nao perde o agendamento: registra e sinaliza para conferencia humana
+            console.error('[Campanha] ALERTA: data/horario nao encontrado nas mensagens do formando - registrado para conferencia. contact_id:', contactId, 'dados:', dadosAgendamento);
+            await sb.from('contatos_campanha').update({ revisao_humana: true }).eq('id', contatoCampanha.id);
             if (contactId) {
               await sb.from('contacts').update({ revisao_humana: true }).eq('id', contactId);
             }
+          }
 
-            console.log(`[Campanha] Contato ${nomeContato} marcado para revisao humana — possivel agendamento nao confirmado pelo cliente`);
-          } else {
-
-        const { error: appointmentError } = await sb.from('appointments').insert({
-          graduand_name: contatoCampanha.nome,
-          contract_number: contatoCampanha.numero_contrato || 'Nao Informado',
-          course: contatoCampanha.curso || 'Outros',
-          date: dadosAgendamento.data,
-          shift: dadosAgendamento.turno || dadosAgendamento.horario || '',
-          location: dadosAgendamento.local || enderecoContato || 'RESIDENCIA',
-          status: 'Em negociacao',
-          contact_id: contactId,
-          campaign_contact_id: contatoCampanha.id,
-          campaign_id: campanha?.id,
-          seller_name: 'INDEFINIDO',
-        });
-        if (appointmentError) {
-          console.error('[Campanha] ERRO ao inserir agendamento:', JSON.stringify(appointmentError), '| Dados enviados:', JSON.stringify(dadosAgendamento));
-        } else {
-          console.log(`[Campanha] Agendamento inserido para: ${nomeContato}`);
-        }
-        novoStatus = 'agendado';
-        }
+          const ok = await inserirAgendamento(sb, {
+            graduand_name: contatoCampanha.nome,
+            contract_number: contatoCampanha.numero_contrato || 'Nao Informado',
+            course: contatoCampanha.curso || 'Outros',
+            date: dadosAgendamento.data,
+            shift: dadosAgendamento.turno || dadosAgendamento.horario || '',
+            location: dadosAgendamento.local || enderecoContato || 'RESIDENCIA',
+            status: 'Em negociacao',
+            contact_id: contactId,
+            seller_name: 'INDEFINIDO',
+            notes: dataValidada ? null : 'CONFERIR: a IA confirmou, mas a data/turno nao aparece claramente nas mensagens do formando.',
+          }, { campaign_contact_id: contatoCampanha.id, campaign_id: campanha?.id });
+          if (ok) console.log(`[Campanha] Agendamento inserido para: ${nomeContato}`);
+          novoStatus = 'agendado';
         }
       }
     } catch (e) {

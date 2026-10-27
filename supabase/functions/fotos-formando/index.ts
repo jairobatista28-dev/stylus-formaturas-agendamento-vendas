@@ -26,6 +26,9 @@ const BASE = 'https://www.meusalbunsdeformatura.com.br';
 const BRAND_ID = 145;
 const CACHE_HORAS = 12;
 const MAX_CANDIDATAS = 6;
+const TAMANHO_MINIMO_FOTO = 8000;   // bytes - abaixo disso e imagem de erro/placeholder, nao foto real
+const NUMERO_ALERTA = '5592993809136'; // recebe aviso quando a foto nao pode ser enviada
+const ALERTA_INTERVALO_HORAS = 3;     // no maximo 1 aviso por motivo a cada 3h
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
 
 function json(body: unknown, status = 200) {
@@ -357,6 +360,7 @@ async function baixarImagem(url: string): Promise<{ base64: string; finalUrl: st
     const tipo = res.headers.get('content-type') || '';
     if (!tipo.includes('image')) return null;
     const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.length < TAMANHO_MINIMO_FOTO) return null; // placeholder de token vencido
     let bin = '';
     for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     return { base64: btoa(bin), finalUrl: res.url || url };
@@ -424,11 +428,11 @@ function tokenDaConta(): string | null {
  * meusalbuns_fotos). Nao depende do login no site: os enderecos das fotos
  * (hash + token) abrem sem login.
  */
-async function prepararFoto(sb: any, contatoCampanhaId: string) {
+async function prepararFoto(sb: any, contatoCampanhaId: string, excluirHashes: string[] = []) {
   const log: string[] = [];
   const { data: cc } = await sb
     .from('contatos_campanha')
-    .select('id, nome, telefone, numero_contrato, status, foto_enviada_em, meusalbuns_aluno')
+    .select('id, nome, telefone, numero_contrato, status, foto_enviada_em, foto_enviada_url, meusalbuns_aluno')
     .eq('id', contatoCampanhaId)
     .maybeSingle();
   if (!cc) return { ok: false, motivo: 'contato_nao_encontrado', log };
@@ -439,38 +443,111 @@ async function prepararFoto(sb: any, contatoCampanhaId: string) {
   log.push(`Alunos sincronizados ${pit ? `na turma ${pit}` : '(todas as turmas)'}: ${linhas?.length || 0}`);
   if (!linhas || !linhas.length) return { ok: false, motivo: 'turma_nao_sincronizada', log, cc };
 
-  const alunos: AlunoMA[] = linhas.map((l: any) => ({
-    NomeAluno: l.nome_aluno,
-    PIT: l.pit,
-    QtdFotos: l.qtd_fotos,
+  // Se ja sabemos qual e o aluno (envio anterior), usa direto
+  let linha: any = cc.meusalbuns_aluno ? linhas.find((l: any) => l.aluno_cript === cc.meusalbuns_aluno) : null;
+  if (!linha) {
+    const alunos: AlunoMA[] = linhas.map((l: any) => ({
+      NomeAluno: l.nome_aluno,
+      PIT: l.pit,
+      QtdFotos: l.qtd_fotos,
+      AlunoTurmaID: 0,
+      AlunoTurmaID_Cript: l.aluno_cript,
+    }));
+    const achado = encontrarAluno(alunos, cc.nome, cc.numero_contrato);
+    if (!achado.aluno) return { ok: false, motivo: achado.motivo, log, cc };
+    linha = linhas.find((l: any) => l.aluno_cript === achado.aluno!.AlunoTurmaID_Cript);
+  }
+  const aluno: AlunoMA = {
+    NomeAluno: linha.nome_aluno,
+    PIT: linha.pit,
+    QtdFotos: linha.qtd_fotos,
     AlunoTurmaID: 0,
-    AlunoTurmaID_Cript: l.aluno_cript,
-  }));
-  const achado = encontrarAluno(alunos, cc.nome, cc.numero_contrato);
-  if (!achado.aluno) return { ok: false, motivo: achado.motivo, log, cc };
-  const aluno = achado.aluno;
-  const linha = linhas.find((l: any) => l.aluno_cript === aluno.AlunoTurmaID_Cript);
+    AlunoTurmaID_Cript: linha.aluno_cript,
+  };
   log.push(`Aluno: ${aluno.NomeAluno} (turma ${aluno.PIT}, ${aluno.QtdFotos} fotos, sincronizado em ${new Date(linha.atualizado_em).toLocaleDateString('pt-BR')})`);
 
-  const fotos: FotoMA[] = (linha.fotos || []).map((f: any) => ({ RenderMain: f.h, Width: f.w, Height: f.a, FlBrinde: false }));
-  if (!fotos.length) return { ok: false, motivo: 'fotos_indisponiveis', log, cc, aluno };
+  const todas: FotoMA[] = (linha.fotos || []).map((f: any) => ({ RenderMain: f.h, Width: f.w, Height: f.a, FlBrinde: false }));
+  if (!todas.length) return { ok: false, motivo: 'fotos_indisponiveis', log, cc, aluno };
 
+  // Evita repetir a mesma foto ja enviada (resgate / novo pedido de previa)
+  const ineditas = todas.filter((f) => !excluirHashes.some((h) => h && String(h).includes(f.RenderMain)));
+  const fotos = ineditas.length ? ineditas : todas;
   const candidatas = selecionarCandidatas(fotos);
-  const baixadas: Array<{ foto: FotoMA; base64: string; url: string }> = [];
-  for (const f of candidatas) {
-    const img = await baixarImagem(urlDaFoto(`${BASE}/ImageFormatura`, f, linha.token_foto));
-    if (img) baixadas.push({ foto: f, base64: img.base64, url: img.finalUrl });
+
+  // Tokens a tentar: o do aluno e, se ele vencer, os das sincronizacoes mais recentes
+  const tokens: string[] = [linha.token_foto];
+  const { data: recentes } = await sb
+    .from('meusalbuns_fotos')
+    .select('token_foto')
+    .order('atualizado_em', { ascending: false })
+    .limit(20);
+  for (const r of recentes || []) if (r.token_foto && !tokens.includes(r.token_foto)) tokens.push(r.token_foto);
+
+  let baixadas: Array<{ foto: FotoMA; base64: string; url: string }> = [];
+  for (const tk of tokens.slice(0, 4)) {
+    baixadas = [];
+    for (const f of candidatas) {
+      const img = await baixarImagem(urlDaFoto(`${BASE}/ImageFormatura`, f, tk));
+      if (img) baixadas.push({ foto: f, base64: img.base64, url: img.finalUrl });
+    }
+    // Todas com o mesmo tamanho = imagem padrao de erro, nao fotos reais
+    const tamanhos = new Set(baixadas.map((b) => b.base64.length));
+    if (baixadas.length > 1 && tamanhos.size === 1) baixadas = [];
+    if (baixadas.length) {
+      if (tk !== linha.token_foto) {
+        log.push('Token do aluno vencido - usado token de uma sincronizacao mais recente');
+        await sb.from('meusalbuns_fotos').update({ token_foto: tk }).eq('aluno_cript', linha.aluno_cript);
+      }
+      break;
+    }
   }
   log.push(`Candidatas baixadas: ${baixadas.length}/${candidatas.length}`);
-  if (!baixadas.length) return { ok: false, motivo: 'fotos_indisponiveis', log, cc, aluno };
+  if (!baixadas.length) return { ok: false, motivo: 'token_vencido', log, cc, aluno };
 
   const escolha = await escolherMelhor(baixadas.map((b) => b.base64), aluno.NomeAluno);
-  if (escolha.indice === -1) return { ok: false, motivo: 'nenhuma_foto_adequada', log, cc, aluno };
-  const melhor = baixadas[escolha.indice] || baixadas[0];
+  // Se o Gemini achar que nenhuma serve, ainda assim manda a primeira candidata
+  // (sao fotos individuais do proprio formando, ja com marca d'agua)
+  const melhor = (escolha.indice >= 0 && baixadas[escolha.indice]) || baixadas[0];
   log.push(`Escolhida: ${escolha.indice} (${escolha.motivo})`);
 
   await sb.from('contatos_campanha').update({ meusalbuns_aluno: aluno.AlunoTurmaID_Cript }).eq('id', cc.id);
   return { ok: true, log, cc, aluno, foto: melhor, motivoEscolha: escolha.motivo };
+}
+
+const MOTIVOS_LEGIVEIS: Record<string, string> = {
+  turma_nao_sincronizada: 'a turma desse contrato ainda nao foi sincronizada. Abra Vendas Pendentes > Foto do formando, copie o codigo e rode no Meus Albuns (F12 > Console).',
+  token_vencido: 'o acesso as fotos venceu. Rode de novo o codigo de sincronizacao no Meus Albuns (Vendas Pendentes > Foto do formando).',
+  fotos_indisponiveis: 'nao ha fotos sincronizadas para esse aluno. Rode a sincronizacao de novo.',
+  nome_nao_encontrado_na_turma: 'o nome da planilha nao bate com o nome no Meus Albuns.',
+  nome_ambiguo: 'existem dois alunos com nome parecido na turma; envie a foto manualmente.',
+  turma_nao_encontrada: 'o contrato da planilha nao foi encontrado no Meus Albuns.',
+  envio_falhou: 'a Uazapi recusou o envio da imagem.',
+};
+
+/** Avisa o Square no WhatsApp quando a foto nao pode ser enviada (com limite de frequencia) */
+async function alertarFalhaFoto(sb: any, nome: string, contrato: string | null, motivo: string, detalhe?: string) {
+  try {
+    const chave = `alerta_foto_${motivo}`;
+    const { data: ultimo } = await sb.from('meusalbuns_cache').select('atualizado_em').eq('chave', chave).maybeSingle();
+    if (ultimo && Date.now() - new Date(ultimo.atualizado_em).getTime() < ALERTA_INTERVALO_HORAS * 3600000) return;
+    await sb.from('meusalbuns_cache').upsert({ chave, valor: { nome, motivo }, atualizado_em: new Date().toISOString() });
+
+    const url = Deno.env.get('UAZAPI_BASE_URL')?.trim();
+    const token = Deno.env.get('UAZAPI_TOKEN')?.trim();
+    if (!url || !token) return;
+    const texto =
+      `⚠️ *Foto do formando NAO enviada*\n\n` +
+      `👤 ${nome}${contrato ? ` (contrato ${contrato})` : ''}\n` +
+      `❌ Motivo: ${MOTIVOS_LEGIVEIS[motivo] || motivo}${detalhe ? `\n${detalhe}` : ''}\n\n` +
+      `👉 Se quiser, envie a foto manualmente pelo painel.`;
+    await fetch(`${url}/send/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', token },
+      body: JSON.stringify({ number: NUMERO_ALERTA, text: texto }),
+    });
+  } catch (e) {
+    console.warn('[Fotos] Falha ao enviar alerta:', e);
+  }
 }
 
 async function enviarImagemUazapi(telefone: string, base64: string, legenda: string, viewOnce: boolean): Promise<{ ok: boolean; erro?: string }> {
@@ -523,7 +600,8 @@ serve(async (req) => {
         .eq('campanhas.tipo_atendimento', 'venda_material')
         .not('status', 'in', '("comprou","sem_interesse")');
       const pits = [...new Set((ccs || []).map((c: any) => String(c.numero_contrato || '').replace(/\D/g, '')).filter(Boolean))];
-      const limite = new Date(Date.now() - (body.forcar ? 0 : 15) * 86400000).toISOString();
+      // Tokens das fotos vencem: re-sincroniza quem foi atualizado ha mais de 1 dia
+      const limite = new Date(Date.now() - (body.forcar ? 0 : 1) * 86400000).toISOString();
       const { data: recentes } = await sb.from('meusalbuns_fotos').select('aluno_cript').gte('atualizado_em', limite);
       return json({ success: true, pits, sincronizados: (recentes || []).map((r: any) => r.aluno_cript) });
     }
@@ -576,24 +654,35 @@ serve(async (req) => {
       });
     }
 
-    // Envio (chamado pela IA de vendas ou pelo botao do painel)
+    // Envio (chamado pela IA de vendas, pelo resgate/prorrogacao ou pelo botao do painel)
+    //  origem: 'ia' | 'resgate' | 'manual'
+    //  forcar: envia mesmo que ja tenha mandado foto antes (escolhe outra foto)
+    //  legenda: substitui a frase padrao (ex: mensagem de prorrogacao)
     if (acao === 'enviar') {
       const { data: cfg } = await sb.from('resgate_config').select('fotos_ativas, fotos_visualizacao_unica, fotos_frase').eq('id', 1).maybeSingle();
       const manual = body.origem === 'manual';
       if (!manual && !cfg?.fotos_ativas) return json({ success: false, motivo: 'fotos_desativadas' });
 
-      const { data: ja } = await sb.from('contatos_campanha').select('foto_enviada_em').eq('id', body.contato_campanha_id).maybeSingle();
+      const { data: ja } = await sb.from('contatos_campanha').select('foto_enviada_em, foto_enviada_url').eq('id', body.contato_campanha_id).maybeSingle();
       if (ja?.foto_enviada_em && !body.forcar) return json({ success: false, motivo: 'foto_ja_enviada' });
 
-      const r: any = await prepararFoto(sb, body.contato_campanha_id);
+      const r: any = await prepararFoto(sb, body.contato_campanha_id, ja?.foto_enviada_url ? [ja.foto_enviada_url] : []);
       if (!r.ok) {
         console.warn('[Fotos] Nao enviou:', r.motivo, r.log);
+        if (!manual && r.cc) await alertarFalhaFoto(sb, r.cc.nome, r.cc.numero_contrato, r.motivo);
         return json({ success: false, motivo: r.motivo, log: r.log });
       }
 
-      const legenda = String(cfg?.fotos_frase || '').replace(/\{nome\}/gi, primeiroNome(r.cc.nome)).trim();
-      const envio = await enviarImagemUazapi(r.cc.telefone, r.foto.base64, legenda, cfg?.fotos_visualizacao_unica !== false);
-      if (!envio.ok) return json({ success: false, motivo: 'envio_falhou', erro: envio.erro, log: r.log });
+      const legendaBase = String(body.legenda || cfg?.fotos_frase || '');
+      const legenda = legendaBase.replace(/\{nome\}/gi, primeiroNome(r.cc.nome)).trim();
+      const viewOnce = cfg?.fotos_visualizacao_unica !== false;
+      let envio = await enviarImagemUazapi(r.cc.telefone, r.foto.base64, legenda, viewOnce);
+      // Algumas versoes da Uazapi recusam viewOnce: tenta de novo como imagem normal
+      if (!envio.ok && viewOnce) envio = await enviarImagemUazapi(r.cc.telefone, r.foto.base64, legenda, false);
+      if (!envio.ok) {
+        if (!manual) await alertarFalhaFoto(sb, r.cc.nome, r.cc.numero_contrato, 'envio_falhou', envio.erro);
+        return json({ success: false, motivo: 'envio_falhou', erro: envio.erro, log: r.log });
+      }
 
       const agora = new Date().toISOString();
       await sb.from('contatos_campanha').update({ foto_enviada_em: agora, foto_enviada_url: r.foto.url }).eq('id', r.cc.id);
@@ -604,14 +693,14 @@ serve(async (req) => {
         await sb.from('messages').insert({
           contact_id: contato.id,
           direction: 'out',
-          content: `[Foto do formando enviada${cfg?.fotos_visualizacao_unica !== false ? ' - visualização única' : ''}] ${legenda}`,
+          content: `[Foto do formando enviada${viewOnce ? ' - visualização única' : ''}] ${legenda}`,
           sent_by: 'ia',
           seq: 0,
           message_type: 'image',
           media_url: r.foto.url,
         });
       }
-      console.log(`[Fotos] Foto enviada para ${r.cc.nome}`);
+      console.log(`[Fotos] Foto enviada para ${r.cc.nome} (origem ${body.origem || 'ia'})`);
       return json({ success: true, log: r.log });
     }
 

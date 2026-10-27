@@ -332,12 +332,150 @@ function montarMensagemConferencia(nome: string, plano: string | null | undefine
   return `${abertura}\n\n${pedido}`;
 }
 
+// ============================================================================
+// VENDA - TRAVA DE ESCOLHA (a IA so registra a opcao quando o formando ESCOLHEU)
+// ============================================================================
+
+/** Divide o texto de planos ("600,00 a vista ou 4x de 200,00 no cartao") em opcoes separadas */
+function dividirOpcoesPlano(texto?: string | null): string[] {
+  return String(texto || '')
+    .split(/\r?\n|;|\s+ou\s+|op[cç][aã]o\s*0?\d+\s*[:\-]/gi)
+    .map((p) => p.trim().replace(/^[-–•▫️\s]+/, ''))
+    .filter((p) => p.length > 2);
+}
+
+const NUM_OPCAO: Record<string, number> = {
+  '1': 1, '01': 1, um: 1, uma: 1, primeira: 1, primeiro: 1,
+  '2': 2, '02': 2, dois: 2, duas: 2, segunda: 2, segundo: 2,
+  '3': 3, '03': 3, tres: 3, terceira: 3, terceiro: 3,
+};
+
+/**
+ * Analisa SO a mensagem atual do formando e diz se ela contem uma escolha
+ * concreta de opcao. "sim", "ok", "pode ser", "quero ver", perguntas e
+ * hesitacoes NAO sao escolha (exceto "sim/quero" quando so existe 1 opcao).
+ */
+function detectarEscolha(textoOriginal: string, dados: any): { escolheu: boolean; plano?: string; forma?: string } {
+  const t = normalizarTexto(textoOriginal);
+  if (!t) return { escolheu: false };
+  const opcoes = dividirOpcoesPlano(dados?.valor_oferecido || dados?.opcoes_plano);
+
+  // Hesitacao, recusa ou duvida: nunca e escolha
+  const hesitacao = /\b(vou pensar|pensar|pensando|depois|mais tarde|amanha|outro dia|semana que vem|mes que vem|nao sei|talvez|caro|cara|sem dinheiro|nao tenho|agora nao|nao quero|nao posso|nao da|nao consigo|nao vou|deixa|duvida|desconto|consigo um|melhor preco|negociar)\b/.test(t);
+  const pergunta = /\?/.test(textoOriginal) || /\b(qual|quais|quanto|quantas|quantos|como|onde|quando|tem como|e se|seria)\b/.test(t);
+
+  let numero: number | null = null;
+  const mNum = t.match(/\b(?:opcao|plano|op|numero|n)\s*(0?[1-3]|um|uma|dois|duas|tres|primeira|primeiro|segunda|segundo|terceira|terceiro)\b/) ||
+    t.match(/^(?:a |o |quero (?:a |o )?|vou (?:de |na |no )?|pode ser (?:a |o )?)?(0?[1-3]|primeira|primeiro|segunda|segundo|terceira|terceiro)(?: opcao)?$/);
+  if (mNum) numero = NUM_OPCAO[mNum[1]] || null;
+
+  const querVista = /\b(pix|a vista|avista|vista|transferencia)\b/.test(t);
+  const querCartao = /\b(cartao|credito|parcelad[oa]|parcelar|parcelas?|\d{1,2}\s*x|vezes)\b/.test(t);
+  const querBoleto = /\bboleto\b/.test(t);
+  const intencaoCompra = /\b(sim|quero|vou querer|vamos|bora|fechado|fechar|fecho|pode ser|pode|aceito|topo|beleza|ok|manda|garantir|garanto|compro|comprar)\b/.test(t);
+
+  // Valor citado que bate com uma das opcoes (ex: "o de 600")
+  let porValor: string | undefined;
+  const valores = t.match(/\b\d{2,5}\b/g) || [];
+  for (const v of valores) {
+    const op = opcoes.find((o) => normalizarTexto(o).replace(/\./g, '').includes(v));
+    if (op) { porValor = op; break; }
+  }
+
+  let plano: string | undefined;
+  if (numero && opcoes[numero - 1]) plano = opcoes[numero - 1];
+  else if (querVista) plano = opcoes.find((o) => /pix|vista/i.test(normalizarTexto(o)));
+  else if (querCartao) plano = opcoes.find((o) => /cart|parcel|\dx|\d x/i.test(normalizarTexto(o)));
+  else if (querBoleto) plano = opcoes.find((o) => /boleto/i.test(normalizarTexto(o)));
+  else if (porValor) plano = porValor;
+
+  const forma = querVista ? 'Pix / a vista' : querCartao ? 'Cartao (parcelado)' : querBoleto ? 'Boleto' : undefined;
+  const escolhaExplicita = !!(numero || querVista || querCartao || querBoleto || porValor);
+
+  if (hesitacao && !escolhaExplicita) return { escolheu: false };
+  if (escolhaExplicita) {
+    // "qual a diferenca do pix pro cartao?" e duvida, nao escolha
+    if (pergunta && !intencaoCompra && !numero) return { escolheu: false };
+    if (/\bnao\b/.test(t) && !intencaoCompra) return { escolheu: false };
+    return { escolheu: true, plano, forma };
+  }
+  // So uma opcao disponivel: "sim, quero" ja define a escolha
+  if (opcoes.length === 1 && intencaoCompra && !pergunta && !hesitacao) {
+    return { escolheu: true, plano: opcoes[0] };
+  }
+  return { escolheu: false };
+}
+
+/** Formando pediu para ver foto/previa */
+function pediuFoto(texto: string): boolean {
+  const t = normalizarTexto(texto);
+  return /\b(previa|amostra|foto|fotos|imagem)\b/.test(t) &&
+    /\b(ver|veja|mostra|mostrar|manda|mandar|envia|enviar|tem|teria|da pra|consigo|posso|quero|gostaria|como ficou|como ficaram)\b/.test(t);
+}
+
+/** A IA escreveu que vai mandar uma foto/previa */
+function prometeuFoto(texto: string): boolean {
+  const t = normalizarTexto(texto);
+  return /\b(envi|mand|mostr|separ)\w*\b.{0,60}\b(foto|previa|imagem)/.test(t) ||
+    /\b(foto|previa|imagem)\w*\b.{0,40}\b(envi|mand|cheg)\w*/.test(t);
+}
+
+/** Remove frases em que a IA promete enviar foto (usado quando a foto nao pode ser enviada) */
+function removerPromessaDeFoto(texto: string): string {
+  const frases = texto.split(/(?<=[.!?])\s+|\n+/);
+  const limpas = frases.filter((f) => !prometeuFoto(f));
+  const r = limpas.join(' ').replace(/\s{2,}/g, ' ').trim();
+  return r || texto;
+}
+
+/** Mensagem do sistema quando a IA tentou registrar uma escolha que o formando nao fez */
+function montarPerguntaEscolha(nome: string, dados: any): string {
+  const pn = primeiroNome(nome);
+  const opcoes = dividirOpcoesPlano(dados?.valor_oferecido || dados?.opcoes_plano);
+  if (opcoes.length >= 2) {
+    const lista = opcoes.map((o, i) => `Opção ${String(i + 1).padStart(2, '0')}: ${o}`).join('\n');
+    return `Pra eu reservar certinho${pn ? ', ' + pn : ''}, qual das opções fica melhor pra você?\n\n${lista}`;
+  }
+  return `Pra eu reservar certinho${pn ? ', ' + pn : ''}: posso seguir com a sua reserva nessa condição?`;
+}
+
 /** Mensagem final: dados confirmados, atendimento repassado ao especialista humano */
 function montarMensagemRepasseHumano(nome: string, plano: string | null | undefined, forma: string | null | undefined, dadosAtualizados: boolean): string {
   const pn = primeiroNome(nome);
   return `Tudo certo${pn ? ', ' + pn : ''}! \u2705 ${dadosAtualizados ? 'Atualizei e confirmei seus dados.' : 'Seus dados estão confirmados.'}\n\n` +
     `Agora vou repassar seu atendimento para um especialista da nossa equipe. Ele vai finalizar com você, enviando o link de pagamento referente à sua escolha${(String(plano || '').trim() || String(forma || '').trim()) ? ` (${descreverPlano(plano, forma)})` : ''} em até ${PRAZO_LINK_PAGAMENTO}.\n\n` +
     `Assim que o pagamento for confirmado, suas fotos são liberadas para você. Obrigada pela confiança! \u{1F4F8}`;
+}
+
+/**
+ * Insere o agendamento sem falhar: tenta com o vinculo da campanha e, se o
+ * banco recusar (chaves estrangeiras antigas apontam para outras tabelas),
+ * tenta de novo sem o vinculo e, por fim, so com os campos essenciais.
+ */
+async function inserirAgendamento(sb: any, base: Record<string, unknown>, vinculo: Record<string, unknown>): Promise<boolean> {
+  const tentativas: Record<string, unknown>[] = [
+    { ...base, ...vinculo },
+    { ...base },
+    {
+      graduand_name: base.graduand_name,
+      contract_number: base.contract_number,
+      course: base.course,
+      date: base.date,
+      shift: base.shift,
+      location: base.location,
+      status: base.status,
+      contact_id: base.contact_id,
+    },
+  ];
+  for (const [i, dados] of tentativas.entries()) {
+    const { error } = await sb.from('appointments').insert(dados);
+    if (!error) {
+      if (i > 0) console.warn(`[Agendamento] Inserido na tentativa ${i + 1} (sem vinculo de campanha)`);
+      return true;
+    }
+    console.error(`[Agendamento] Tentativa ${i + 1} falhou:`, JSON.stringify(error));
+  }
+  return false;
 }
 
 /**
@@ -733,9 +871,33 @@ async function chamarGemini(
       systemInstruction += `
 
 ## IDENTIDADE E OBJETIVO
-Voce e uma assistente de vendas calorosa e humana, falando com ${nomeContato}, que ja e
-formando(a) e ja teve contato anterior com a empresa. Seu objetivo e conduzir, com empatia
-e argumentacao real, ate a decisao de compra do material fotografico da formatura dele(a).
+Voce e a Sophia, consultora senior do setor de fotografia da Stylus Formaturas, especialista
+em venda de material fotografico de formatura. Voce ja ajudou milhares de formandos a garantir
+as fotos do dia mais importante da vida academica deles. Esta falando com ${nomeContato}, que ja
+e formando(a) e ja teve contato anterior com a empresa. Seu objetivo e conduzir a conversa com
+seguranca, elegancia e argumentos reais ate uma DECISAO consciente do formando - nunca empurrar.
+
+## COMO UMA VENDEDORA DE ALTO NIVEL CONDUZ (siga esta metodologia)
+1. ESCUTE PRIMEIRO: responda exatamente o que ele perguntou ou disse antes de avancar.
+2. VALOR ANTES DO PRECO: quando falar de preco, ancore no valor de tabela, mostre que o acervo e
+   dele (quantidade de fotos, tratadas, alta resolucao) e so entao apresente a condicao especial.
+3. OBJECOES COM EMPATIA: valide o sentimento ("entendo totalmente"), traga UM argumento concreto
+   e devolva a decisao para ele com uma pergunta leve. Exemplos:
+   - "Esta caro": compare com o valor de tabela e mostre a opcao parcelada como solucao.
+   - "Vou pensar": pergunte com gentileza o que ficou pendente ("e o valor, a forma de pagamento
+     ou alguma duvida sobre as fotos?") e lembre o prazo real, sem drama.
+   - "Agora nao tenho dinheiro": ofereca o parcelamento ou programar a compra para uma data.
+   - "Nao tenho interesse": respeite, agradeca e encerre com elegancia (###SEM_INTERESSE###).
+4. URGENCIA REAL: o prazo de guarda e verdadeiro; cite a data uma vez quando fizer sentido, sem
+   repetir em todas as mensagens e sem ameacas.
+5. FECHAMENTO POR ALTERNATIVA: depois que ele conhecer as condicoes, pergunte qual das opcoes faz
+   mais sentido para ele (ex: "Prefere garantir a vista no Pix ou parcelado no cartao?"). Uma
+   pergunta por mensagem, sempre terminando com uma pergunta que faca a conversa andar.
+6. PROFISSIONALISMO: portugues correto, frases curtas, no maximo 1 emoji por mensagem, nada de
+   girias ou exageros. Tom de consultora experiente: segura, gentil e objetiva.
+7. NUNCA fale do "sistema", de "marcadores", de "anotar no sistema" ou de etapas internas.
+   NUNCA diga que vai enviar foto, previa, link ou documento - isso e feito pela equipe/sistema
+   quando for o caso.
 
 ## ATENCAO - MENSAGEM FIXA JA ENVIADA
 O formando JA RECEBEU uma mensagem inicial fixa (fora do seu controle) com a abertura
@@ -790,7 +952,7 @@ agendamento/visita, nao se aplica aqui) - em vez disso, corrija o erro educadame
 valores reais informados acima, deixando claro qual e o total de cada opcao.
 
 ## REGRAS DE TOM
-- Fale como uma pessoa real, proxima e calorosa. Frases curtas, nunca parecendo script.
+- Fale como uma consultora real, proxima e segura. Frases curtas, nunca parecendo script.
 - Nunca minta sobre prazos, nunca use caixa alta ou excesso de emojis.
 - Sempre mencione o valor de tabela antes do valor promocional, para o desconto ter peso real.
 - Se o cliente disser "nao tenho dinheiro agora", apresente as opcoes de plano como solucao.
@@ -806,13 +968,16 @@ valores reais informados acima, deixando claro qual e o total de cada opcao.
   texto entre colchetes/chaves no lugar do nome — se algum trecho de instrucao acima citar um
   exemplo assim, e apenas ilustrativo, nunca copie esse formato literal na sua resposta.
 
-## REGRA CRITICA - VOCE NUNCA FECHA A VENDA SOZINHA
-Voce NUNCA envia link de pagamento e NUNCA fecha a venda sozinha. Seu papel termina quando
-o formando deixa claro QUAL opcao quer (ex: "quero a opcao 1", "vou no pix", "pode ser a
-vista", "quero parcelado"). Nesse momento gere IMEDIATAMENTE o marcador abaixo, sem pedir
-"Combinado?" ou qualquer confirmacao extra: o sistema envia automaticamente a confirmacao da
-escolha, a conferencia de CPF/e-mail e o repasse para o especialista humano - entao voce NAO
-precisa escrever essa parte. Inclua OBRIGATORIAMENTE ao final da resposta o marcador tecnico exato:
+## REGRA CRITICA - SO REGISTRE A ESCOLHA QUANDO O FORMANDO ESCOLHER
+Voce NUNCA envia link de pagamento e NUNCA fecha a venda sozinha. NUNCA presuma que o formando
+aceitou: respostas como "oi", "ok", "sim", "pode ser", "entendi", "legal", "manda", "quero ver",
+"me passa as condicoes", perguntas, duvidas ou hesitacoes NAO sao escolha de opcao. Se houver
+mais de uma opcao e ele so disser "sim"/"quero", pergunte QUAL opcao ele prefere.
+So considere escolha quando, NA MENSAGEM ATUAL, ele indicar claramente a opcao (ex: "quero a
+opcao 1", "vou no pix", "a vista", "parcelado no cartao", "o de 600"). Somente nesse momento
+gere o marcador abaixo, sem pedir "Combinado?". NUNCA escreva "anotei sua escolha" por conta
+propria: a confirmacao da escolha, a conferencia de CPF/e-mail e o repasse ao especialista sao
+enviados automaticamente. Inclua ao final da resposta o marcador tecnico exato:
 ###QUER_COMPRAR###{"plano_escolhido":"TEXTO_DO_PLANO","forma_pagamento_escolhida":"TEXTO_DA_FORMA"}###FIM###
 
 CRITICO SOBRE O CAMPO "plano_escolhido": coloque APENAS a opcao especifica que o formando
@@ -838,7 +1003,8 @@ o sistema confere o prazo maximo permitido e responde ao formando.
 Voce JA esta em atendimento com esse formando. NUNCA se reapresente ("Ola, meu nome e
 Sophia...") e NUNCA pergunte "Em que posso te ajudar?" no meio da conversa - isso passa
 inseguranca. Se a mensagem dele for curta ("sim", "ok", "sin"), interprete pelo que voce
-mesma perguntou na mensagem anterior e siga o fluxo.
+mesma perguntou na mensagem anterior e siga o fluxo - mas um "sim" generico NUNCA vale como
+escolha de opcao de pagamento quando existe mais de uma opcao: nesse caso pergunte qual prefere.
 
 ${contextoAgendamento}
 
@@ -1610,21 +1776,48 @@ Se ele quiser mudar a data, gere ###COMPRA_FUTURA### com a nova data.`;
     }
   }
 
-  // Foto do formando (Meus Albuns): a IA decide o momento, o sistema envia
+  // Foto do formando (Meus Albuns): a IA decide o momento, o sistema envia.
+  // Primeira foto: quando a IA marcar ###ENVIAR_FOTO### ou o formando pedir.
+  // Fotos extras (outra foto, nunca a mesma): so quando o formando pedir de novo (max 3 no total).
   let podeEnviarFoto = false;
+  let fotoExtra = false;
   let contextoFoto = '';
-  if (ehVendaMaterial && !emConferencia && dadosContato.id && !dadosContato.foto_enviada_em) {
+  const formandoPediuFoto = pediuFoto(texto_resposta);
+  if (ehVendaMaterial && !emConferencia && dadosContato.id) {
     const { data: cfgFotos } = await sb.from('resgate_config').select('fotos_ativas').eq('id', 1).maybeSingle();
-    podeEnviarFoto = !!cfgFotos?.fotos_ativas;
+    if (cfgFotos?.fotos_ativas) {
+      let fotosJaEnviadas = 0;
+      if (contactId) {
+        const { count } = await sb
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('contact_id', contactId)
+          .eq('direction', 'out')
+          .like('content', '[Foto do formando%');
+        fotosJaEnviadas = count || 0;
+      }
+      if (!dadosContato.foto_enviada_em && fotosJaEnviadas === 0) {
+        podeEnviarFoto = true;
+      } else if (formandoPediuFoto && fotosJaEnviadas < 3) {
+        podeEnviarFoto = true;
+        fotoExtra = true;
+      }
+    }
     if (podeEnviarFoto) {
-      contextoFoto = `## FOTO DO FORMANDO (recurso de alto impacto - use UMA vez)
-O sistema consegue enviar ao formando uma foto dele(a) da formatura (previa com marca d'agua, em
-visualizacao unica). Inclua o marcador ###ENVIAR_FOTO### ao final da resposta UMA unica vez, no
-momento em que isso mais ajuda a venda: quando ele demonstrar interesse, perguntar valores ou
-quantas fotos sao, ou hesitar ("vou pensar", "esta caro", "agora nao da"). Nao use o marcador se
-ele estiver irritado, se disser que nao quer ou se pedir para parar.
-Nao descreva a foto nem diga que vai mandar: o sistema envia logo depois da sua mensagem, com a
-legenda certa. Continue a conversa normalmente.`;
+      contextoFoto = `## FOTO DO FORMANDO (recurso de alto impacto)
+O formando vai receber uma foto dele(a) da formatura (previa com marca d'agua, em visualizacao
+unica). ${formandoPediuFoto
+  ? 'Ele PEDIU para ver: a foto sera enviada junto com a sua resposta. Responda normalmente, sem anunciar o envio.'
+  : `Inclua o marcador ###ENVIAR_FOTO### ao final da resposta no momento em que isso mais ajuda a
+venda: quando ele demonstrar interesse, perguntar valores ou quantas fotos sao, ou hesitar
+("vou pensar", "esta caro", "agora nao da"). Nao use o marcador se ele estiver irritado, se
+disser que nao quer ou se pedir para parar.`}
+Nunca descreva a foto e nunca diga "vou te enviar" / "o sistema vai enviar": a foto chega
+sozinha, com a legenda certa. Continue a conversa normalmente, puxando para a decisao.`;
+    } else {
+      contextoFoto = `## FOTOS
+Nao prometa enviar fotos, previas ou amostras nesta resposta. Se ele pedir para ver, diga que
+todas as fotos sao tratadas e em alta resolucao e conduza para a escolha da opcao.`;
     }
   }
 
@@ -1644,7 +1837,7 @@ legenda certa. Continue a conversa normalmente.`;
     }
   }
 
-  const respostaIA = await chamarGemini(
+  let respostaIA = await chamarGemini(
     sb,
     campanha.prompt_ia || '',
     campanha.base_conhecimento || '',
@@ -1657,10 +1850,45 @@ legenda certa. Continue a conversa normalmente.`;
     dadosContato as DadosVenda
   );
 
+  // TRAVA DE ESCOLHA: a IA so pode registrar a opcao se a mensagem atual do
+  // formando realmente contem uma escolha. Senao, gera a resposta de novo
+  // proibindo o marcador (e, em ultimo caso, pergunta qual opcao ele prefere).
+  const escolhaDetectada = ehVendaMaterial ? detectarEscolha(texto_resposta, dadosContato) : { escolheu: false };
+  let escolhaBloqueada = false;
+  if (ehVendaMaterial && !emConferencia && respostaIA && respostaIA.includes('###QUER_COMPRAR###') && !escolhaDetectada.escolheu) {
+    console.log(`[Processor] TRAVA: IA tentou registrar escolha sem o formando escolher ("${texto_resposta}") - refazendo resposta`);
+    const contextoTrava = `${contextoAgendamento}
+
+## ATENCAO - O FORMANDO AINDA NAO ESCOLHEU (regra prioritaria)
+A mensagem atual dele ("${texto_resposta.slice(0, 200)}") NAO e uma escolha de opcao. NAO use
+###QUER_COMPRAR###, NAO diga "anotei sua escolha" e NAO peca CPF ou e-mail. Responda o que ele
+disse e, se fizer sentido, pergunte qual das opcoes ele prefere.`;
+    const refeita = await chamarGemini(
+      sb,
+      campanha.prompt_ia || '',
+      campanha.base_conhecimento || '',
+      texto_resposta,
+      nome,
+      campanha.opcoes_agendamento || [],
+      history,
+      contextoTrava,
+      campanha.tipo_atendimento || 'visita_externa',
+      dadosContato as DadosVenda
+    );
+    if (refeita && !refeita.includes('###QUER_COMPRAR###') && !/anotei sua escolha/i.test(refeita)) {
+      respostaIA = refeita;
+    } else {
+      escolhaBloqueada = true;
+    }
+  }
+
   if (respostaIA) {
     let novoStatus = emConferencia ? 'confirmando_dados' : (statusVendaAtual === 'compra_futura' ? 'compra_futura' : 'em_conversa');
     // Quando definido, substitui o texto da IA por uma mensagem padronizada do sistema
     let respostaSistema: string | null = null;
+    if (escolhaBloqueada) {
+      respostaSistema = montarPerguntaEscolha(nomeCompleto, dadosContato);
+    }
 
     // TRAVA DE SEGURANCA: verificar se a etapa de confirmacao de endereco aconteceu
     let etapaEnderecoOk = false;
@@ -1753,22 +1981,19 @@ legenda certa. Continue a conversa normalmente.`;
             const dataValidada = validarDataHorarioMencionado(dados.data, horarioOuTurno, textosFormando, campanha?.opcoes_agendamento || []);
 
             if (!dataValidada) {
-              console.error('[Processor] ALERTA: IA tentou confirmar agendamento sem validacao — data/horario nao encontrado nas mensagens do formando. contact_id:', contactId, 'dados:', dados);
-
+              // Nao perde o agendamento: registra, mas sinaliza para conferencia humana
+              console.error('[Processor] ALERTA: data/horario nao encontrado nas mensagens do formando - agendamento registrado para conferencia. contact_id:', contactId, 'dados:', dados);
               await sb
                 .from('contatos_campanha')
                 .update({ revisao_humana: true })
                 .eq('campanha_id', campanha.id)
                 .eq('telefone', telefone);
-
               if (contactId) {
                 await sb.from('contacts').update({ revisao_humana: true }).eq('id', contactId);
               }
+            }
 
-              console.log(`[Processor] Contato ${nome} marcado para revisao humana — possivel agendamento nao confirmado pelo cliente`);
-            } else {
-
-            const { error: appointmentError } = await sb.from('appointments').insert({
+            const ok = await inserirAgendamento(sb, {
               graduand_name: nomeCompleto,
               contract_number: dadosContato.numero_contrato || 'Nao Informado',
               course: dadosContato.curso || 'Outros',
@@ -1777,16 +2002,12 @@ legenda certa. Continue a conversa normalmente.`;
               location: dados.local || dadosContato.local || 'RESIDENCIA',
               status: 'Em negociacao',
               contact_id: contactId,
-              campaign_contact_id: dadosContato.id,
-              campaign_id: campanha.id,
               seller_name: 'INDEFINIDO',
-            });
-            if (appointmentError) {
-              console.error('[Processor] ERRO ao inserir agendamento:', JSON.stringify(appointmentError));
-            } else {
+              notes: dataValidada ? null : 'CONFERIR: a IA confirmou, mas a data/turno nao aparece claramente nas mensagens do formando.',
+            }, { campaign_contact_id: dadosContato.id, campaign_id: campanha.id });
+            if (ok) {
               console.log(`[Processor] Agendamento inserido para: ${nome}`);
               novoStatus = 'agendado';
-            }
             }
           } else {
             console.error('[Processor] Data invalida recebida da IA:', dados.data);
@@ -1798,7 +2019,7 @@ legenda certa. Continue a conversa normalmente.`;
     }
 
     // Processa intencao de compra confirmada (fluxo de venda de material apenas)
-    if (ehVendaMaterial && !emConferencia && respostaIA.includes('###QUER_COMPRAR###')) {
+    if (ehVendaMaterial && !emConferencia && !escolhaBloqueada && respostaIA.includes('###QUER_COMPRAR###')) {
       let planoEscolhido = '';
       let formaPagamentoEscolhida = '';
       try {
@@ -1811,6 +2032,9 @@ legenda certa. Continue a conversa normalmente.`;
       } catch (e) {
         console.error('[Processor] Falha ao parsear QUER_COMPRAR:', e);
       }
+      // A opcao que o formando citou na mensagem prevalece sobre a interpretacao da IA
+      if (escolhaDetectada.plano) planoEscolhido = escolhaDetectada.plano;
+      if (escolhaDetectada.forma && !formaPagamentoEscolhida) formaPagamentoEscolhida = escolhaDetectada.forma;
 
       // Escolha feita: em vez de a IA "improvisar" o fechamento, o sistema
       // confirma a opcao e ja pede a conferencia de CPF/e-mail. O vendedor so
@@ -1910,14 +2134,13 @@ legenda certa. Continue a conversa normalmente.`;
       .replace(/###SEM_INTERESSE###/g, '')
       .trim();
 
-    const sucesso = respostaLimpa ? await enviarMensagemUazapi(telefone, respostaLimpa) : false;
-
-    // Envia a foto do formando logo depois da mensagem (se a IA pediu e a venda segue ativa)
+    // FOTO DO FORMANDO: enviada ANTES do texto, para a resposta da IA nunca
+    // prometer uma foto que nao chegou. Dispara quando a IA marcou, quando o
+    // formando pediu para ver ou quando a IA escreveu que ia mandar.
     const statusQueBloqueiamFoto = ['sem_interesse', 'transferido_humano', 'confirmando_dados'];
-    if (
-      sucesso && podeEnviarFoto && respostaIA.includes('###ENVIAR_FOTO###') &&
-      !statusQueBloqueiamFoto.includes(novoStatus)
-    ) {
+    const querFoto = respostaIA.includes('###ENVIAR_FOTO###') || formandoPediuFoto || prometeuFoto(respostaLimpa);
+    let fotoEnviada = false;
+    if (podeEnviarFoto && querFoto && !statusQueBloqueiamFoto.includes(novoStatus) && dadosContato.id) {
       try {
         const rf = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/fotos-formando`, {
           method: 'POST',
@@ -1925,14 +2148,19 @@ legenda certa. Continue a conversa normalmente.`;
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
           },
-          body: JSON.stringify({ acao: 'enviar', contato_campanha_id: dadosContato.id, origem: 'ia' }),
+          body: JSON.stringify({ acao: 'enviar', contato_campanha_id: dadosContato.id, origem: 'ia', forcar: fotoExtra }),
         });
         const jf = await rf.json().catch(() => ({}));
-        console.log(`[Processor] Foto do formando ${nomeCompleto}:`, jf?.success ? 'enviada' : jf?.motivo);
+        fotoEnviada = !!jf?.success;
+        console.log(`[Processor] Foto do formando ${nomeCompleto}:`, fotoEnviada ? 'enviada' : jf?.motivo);
       } catch (e) {
         console.error('[Processor] Erro ao enviar foto do formando:', e);
       }
     }
+    // Sem foto enviada, tira do texto qualquer promessa de foto
+    const textoFinal = !fotoEnviada && prometeuFoto(respostaLimpa) ? removerPromessaDeFoto(respostaLimpa) : respostaLimpa;
+
+    const sucesso = textoFinal ? await enviarMensagemUazapi(telefone, textoFinal) : false;
     await logarEnvio(sb, campanha.id, telefone, sucesso);
 
     if (sucesso) {
@@ -1940,7 +2168,7 @@ legenda certa. Continue a conversa normalmente.`;
         await sb.from('messages').insert({
           contact_id: contactId,
           direction: 'out',
-          content: respostaLimpa,
+          content: textoFinal,
           sent_by: 'ia',
           seq: 0,
         });
