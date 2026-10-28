@@ -525,7 +525,20 @@ const MOTIVOS_LEGIVEIS: Record<string, string> = {
 };
 
 /** Avisa o Square no WhatsApp quando a foto nao pode ser enviada (com limite de frequencia) */
-async function alertarFalhaFoto(sb: any, nome: string, contrato: string | null, motivo: string, detalhe?: string) {
+async function alertarFalhaFoto(sb: any, nome: string, contrato: string | null, motivo: string, detalhe?: string, telefone?: string | null) {
+  // Painel de Alertas: registra TODA falha (o WhatsApp abaixo tem limite de frequencia)
+  try {
+    await sb.from('alertas_sistema').insert({
+      tipo: 'foto_falhou',
+      gravidade: 'erro',
+      titulo: 'Foto do formando nao enviada',
+      detalhe: `${MOTIVOS_LEGIVEIS[motivo] || motivo}${detalhe ? ' | ' + detalhe : ''}${contrato ? ' | contrato ' + contrato : ''}`.slice(0, 2000),
+      contato_nome: nome,
+      telefone: telefone || null,
+    });
+  } catch (e) {
+    console.warn('[Fotos] Alerta nao registrado no painel:', e);
+  }
   try {
     const chave = `alerta_foto_${motivo}`;
     const { data: ultimo } = await sb.from('meusalbuns_cache').select('atualizado_em').eq('chave', chave).maybeSingle();
@@ -669,7 +682,7 @@ serve(async (req) => {
       const r: any = await prepararFoto(sb, body.contato_campanha_id, ja?.foto_enviada_url ? [ja.foto_enviada_url] : []);
       if (!r.ok) {
         console.warn('[Fotos] Nao enviou:', r.motivo, r.log);
-        if (!manual && r.cc) await alertarFalhaFoto(sb, r.cc.nome, r.cc.numero_contrato, r.motivo);
+        if (!manual && r.cc) await alertarFalhaFoto(sb, r.cc.nome, r.cc.numero_contrato, r.motivo, undefined, r.cc.telefone);
         return json({ success: false, motivo: r.motivo, log: r.log });
       }
 
@@ -680,7 +693,7 @@ serve(async (req) => {
       // Algumas versoes da Uazapi recusam viewOnce: tenta de novo como imagem normal
       if (!envio.ok && viewOnce) envio = await enviarImagemUazapi(r.cc.telefone, r.foto.base64, legenda, false);
       if (!envio.ok) {
-        if (!manual) await alertarFalhaFoto(sb, r.cc.nome, r.cc.numero_contrato, 'envio_falhou', envio.erro);
+        if (!manual) await alertarFalhaFoto(sb, r.cc.nome, r.cc.numero_contrato, 'envio_falhou', envio.erro, r.cc.telefone);
         return json({ success: false, motivo: 'envio_falhou', erro: envio.erro, log: r.log });
       }
 

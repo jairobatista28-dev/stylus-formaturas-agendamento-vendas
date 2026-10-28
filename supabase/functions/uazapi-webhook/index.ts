@@ -392,6 +392,88 @@ async function baixarMidiaUazapi(messageId: string): Promise<{ fileUrl: string |
   }
 }
 
+/** Registra um alerta no Painel de Alertas (nunca interrompe o fluxo se falhar) */
+async function registrarAlerta(sb: any, a: {
+  tipo: string;
+  gravidade?: 'info' | 'atencao' | 'erro';
+  titulo: string;
+  detalhe?: string | null;
+  contato_nome?: string | null;
+  telefone?: string | null;
+}): Promise<void> {
+  try {
+    const { error } = await sb.from('alertas_sistema').insert({
+      tipo: a.tipo,
+      gravidade: a.gravidade || 'info',
+      titulo: a.titulo,
+      detalhe: a.detalhe ? String(a.detalhe).slice(0, 2000) : null,
+      contato_nome: a.contato_nome || null,
+      telefone: a.telefone || null,
+    });
+    if (error) console.warn('[Alerta] Nao registrado:', error.message);
+  } catch (e) {
+    console.warn('[Alerta] Falha ao registrar:', e);
+  }
+}
+
+/**
+ * Transcreve um audio do WhatsApp com o Gemini. Devolve o texto falado ou
+ * null se nao conseguir (audio vazio, inaudivel, muito grande ou erro).
+ */
+async function transcreverAudio(url: string, mimeHint?: string | null): Promise<string | null> {
+  const chave = Deno.env.get('GEMINI_API_KEY');
+  if (!chave || !url) return null;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.error(`[Audio] Falha ao baixar audio: ${res.status}`);
+      return null;
+    }
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (!bytes.length || bytes.length > 15 * 1024 * 1024) return null;
+    let mime = String(mimeHint || res.headers.get('content-type') || 'audio/ogg').split(';')[0].trim().toLowerCase();
+    if (!mime.startsWith('audio/')) mime = 'audio/ogg';
+
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    const base64 = btoa(bin);
+
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${chave}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            role: 'user',
+            parts: [
+              { inline_data: { mime_type: mime, data: base64 } },
+              {
+                text:
+                  'Transcreva fielmente este audio de WhatsApp (portugues do Brasil, podendo ter girias ou espanhol). ' +
+                  'Responda SOMENTE com a transcricao, sem comentarios, sem aspas e sem descrever sons. ' +
+                  'Se nao houver fala compreensivel, responda exatamente: [inaudivel]',
+              },
+            ],
+          }],
+          generationConfig: { temperature: 0 },
+        }),
+      }
+    );
+    if (!resp.ok) {
+      console.error(`[Audio] Gemini ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+      return null;
+    }
+    const j = await resp.json();
+    const texto = String(j?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join(' ') || '').trim();
+    if (!texto || /^\[?inaudivel\]?$/i.test(texto)) return null;
+    return texto.slice(0, 3000);
+  } catch (e) {
+    console.error('[Audio] Erro na transcricao:', e);
+    return null;
+  }
+}
+
 // Tipos de mensagem da uazapi que representam midia (nao texto puro)
 const TIPOS_MIDIA = ['image', 'video', 'document', 'audio', 'ptt', 'sticker'];
 
@@ -537,6 +619,14 @@ async function executarFluxoIaPadrao(
           if (!dataValidada) {
             console.error('[SaaS] ALERTA: data/horario nao encontrado nas mensagens do formando - registrado para conferencia. contact_id:', contato.id, 'dados:', dados);
             await sb.from('contacts').update({ revisao_humana: true }).eq('id', contato.id);
+            await registrarAlerta(sb, {
+              tipo: 'agendamento_conferir',
+              gravidade: 'atencao',
+              titulo: 'Agendamento para conferir',
+              detalhe: `A IA confirmou ${dados.data} (${dados.turno || dados.horario || 'sem turno'}), mas a data/turno nao aparece claramente nas mensagens do formando.`,
+              contato_nome: contato.name || null,
+              telefone: contato.phone || null,
+            });
           }
           const ok = await inserirAgendamento(sb, {
             graduand_name: contato.name || 'Formando',
@@ -871,6 +961,14 @@ async function executarFluxoCampanha(
             if (contactId) {
               await sb.from('contacts').update({ revisao_humana: true }).eq('id', contactId);
             }
+            await registrarAlerta(sb, {
+              tipo: 'agendamento_conferir',
+              gravidade: 'atencao',
+              titulo: 'Agendamento para conferir',
+              detalhe: `A IA confirmou ${dadosAgendamento.data} (${dadosAgendamento.turno || dadosAgendamento.horario || 'sem turno'}), mas a data/turno nao aparece claramente nas mensagens do formando.`,
+              contato_nome: contatoCampanha.nome,
+              telefone: telefoneNormalizado,
+            });
           }
 
           const ok = await inserirAgendamento(sb, {
@@ -1050,7 +1148,13 @@ serve(async (req) => {
     // Extrai telefone, tipo de mensagem e texto/legenda
     const remoteJid = msg?.chatid || (body as any).chat?.wa_chatid || '';
     const telefoneCliente = remoteJid.split('@')[0];
-    const tipoMensagem = (msg?.messageType || '').toLowerCase();
+    const tipoMensagemBruto = (msg?.messageType || '').toLowerCase();
+    const tipoMidiaUazapi = String(msg?.mediaType || '').toLowerCase();
+    // Audio pode chegar como "audio", "ptt", "audiomessage" ou com mediaType "ptt"
+    const ehAudio = /audio|ptt|voice/.test(tipoMensagemBruto) || /audio|ptt/.test(tipoMidiaUazapi);
+    const tipoMensagem = ehAudio
+      ? (tipoMensagemBruto === 'ptt' || tipoMidiaUazapi === 'ptt' ? 'ptt' : 'audio')
+      : tipoMensagemBruto;
     const ehMidia = TIPOS_MIDIA.includes(tipoMensagem);
     const legendaOuTexto = msg?.text || msg?.content?.text || (body as any).chat?.wa_lastMessageTextVote || '';
 
@@ -1065,9 +1169,11 @@ serve(async (req) => {
     // Se for midia (foto, documento, audio...), baixa o arquivo na Uazapi pra
     // obter uma URL publica que possamos salvar/encaminhar
     let mediaUrlRecebida: string | null = null;
+    let mimeMidiaRecebida: string | null = null;
     if (ehMidia && rawMessageId) {
       const download = await baixarMidiaUazapi(rawMessageId);
       mediaUrlRecebida = download.fileUrl;
+      mimeMidiaRecebida = download.mimetype;
       console.log(`[Webhook] Midia (${tipoMensagem}) baixada: ${mediaUrlRecebida || 'FALHOU'}`);
     }
 
@@ -1082,7 +1188,7 @@ serve(async (req) => {
 
     // Texto usado no historico/dedup/IA: legenda quando houver, senao um
     // placeholder legivel de acordo com o tipo de midia
-    const textoRecebido = legendaOuTexto || placeholdersPorTipoMidia[tipoMensagem] || '[Midia recebida]';
+    let textoRecebido = legendaOuTexto || placeholdersPorTipoMidia[tipoMensagem] || '[Midia recebida]';
 
     const telefoneNormalizado = normalizePhone(telefoneCliente);
 
@@ -1110,6 +1216,25 @@ serve(async (req) => {
     // Registra o evento como processado o mais cedo possivel
     await registrarEventoProcessado(sb, rawMessageId, telefoneNormalizado, textoRecebido);
     console.log(`[Webhook] Evento registrado como processado: msg_id="${rawMessageId}"`);
+
+    // AUDIO: transcreve com o Gemini para a IA entender e o painel mostrar o texto
+    if (ehAudio) {
+      const transcricao = mediaUrlRecebida ? await transcreverAudio(mediaUrlRecebida, mimeMidiaRecebida) : null;
+      if (transcricao) {
+        textoRecebido = `🎤 ${transcricao}`;
+        console.log(`[Webhook] Audio transcrito: "${transcricao.slice(0, 80)}"`);
+      } else {
+        const { data: contatoAudio } = await sb.from('contacts').select('name').eq('phone', telefoneNormalizado).maybeSingle();
+        await registrarAlerta(sb, {
+          tipo: 'audio_falhou',
+          gravidade: 'erro',
+          titulo: 'Audio nao transcrito',
+          detalhe: 'O formando mandou um audio que nao foi possivel transcrever (inaudivel ou falha no download). Ouca e responda manualmente.',
+          contato_nome: contatoAudio?.name || null,
+          telefone: telefoneNormalizado,
+        });
+      }
+    }
 
     // VERIFICACAO DE MODO MANUAL: se o contato esta em modo manual, salva a mensagem mas nao chama a IA
     const { data: contatoManual } = await sb

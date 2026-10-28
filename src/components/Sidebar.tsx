@@ -11,7 +11,10 @@ import {
   ChevronRight as ChevronRightIcon,
   Upload,
   ShoppingCart,
+  Filter,
+  Bell,
 } from 'lucide-react';
+import { supabase } from '../lib/supabase';
 
 const AVATAR_STORAGE_KEY = 'stylus-admin-avatar';
 
@@ -27,6 +30,30 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   useEffect(() => {
     const saved = localStorage.getItem(AVATAR_STORAGE_KEY);
     if (saved) setAvatarUrl(saved);
+  }, []);
+
+  // Contador de alertas nao lidos (tempo real + conferencia a cada 60s)
+  const [alertasNaoLidos, setAlertasNaoLidos] = useState(0);
+  useEffect(() => {
+    const contar = async () => {
+      const { count, error } = await supabase
+        .from('alertas_sistema')
+        .select('id', { count: 'exact', head: true })
+        .eq('lido', false);
+      if (!error) setAlertasNaoLidos(count || 0);
+    };
+    contar();
+    const canal = supabase
+      .channel('alertas-contador')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'alertas_sistema' }, () => contar())
+      .subscribe();
+    const intervalo = setInterval(() => {
+      if (!document.hidden) contar();
+    }, 60000);
+    return () => {
+      supabase.removeChannel(canal);
+      clearInterval(intervalo);
+    };
   }, []);
 
   const handleAvatarClick = () => {
@@ -107,6 +134,40 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         >
           <ShoppingCart size={20} />
           {!collapsed && <span>Vendas Pendentes</span>}
+        </NavLink>
+
+        <NavLink
+          to="/funil"
+          className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+          title={collapsed ? 'Funil de Vendas' : undefined}
+        >
+          <Filter size={20} />
+          {!collapsed && <span>Funil de Vendas</span>}
+        </NavLink>
+
+        <NavLink
+          to="/alertas"
+          className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+          title={collapsed ? `Alertas${alertasNaoLidos ? ` (${alertasNaoLidos})` : ''}` : undefined}
+        >
+          <span className="relative inline-flex">
+            <Bell size={20} />
+            {collapsed && alertasNaoLidos > 0 && (
+              <span
+                className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full"
+                style={{ backgroundColor: '#EF4444' }}
+              />
+            )}
+          </span>
+          {!collapsed && <span className="flex-1">Alertas</span>}
+          {!collapsed && alertasNaoLidos > 0 && (
+            <span
+              className="min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-semibold inline-flex items-center justify-center"
+              style={{ backgroundColor: '#EF4444', color: 'white' }}
+            >
+              {alertasNaoLidos > 99 ? '99+' : alertasNaoLidos}
+            </span>
+          )}
         </NavLink>
 
         <NavLink

@@ -27,5 +27,17 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    // Bibliotecas grandes em arquivos separados: ficam em cache no navegador
+    // e so baixam quando a tela que usa precisa delas
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ['react', 'react-dom', 'react-router-dom'],
+          supabase: ['@supabase/supabase-js'],
+          graficos: ['recharts'],
+          planilhas: ['xlsx'],
+        },
+      },
+    },
   },
 });

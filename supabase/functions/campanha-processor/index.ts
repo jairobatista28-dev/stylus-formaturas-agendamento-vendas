@@ -338,9 +338,11 @@ function montarMensagemConferencia(nome: string, plano: string | null | undefine
 
 /** Divide o texto de planos ("600,00 a vista ou 4x de 200,00 no cartao") em opcoes separadas */
 function dividirOpcoesPlano(texto?: string | null): string[] {
-  return String(texto || '')
+  // Protege o que esta entre parenteses: "600,00 (1x ou 3x sem juros)" e UMA opcao so
+  const protegido = String(texto || '').replace(/\([^)]*\)/g, (m) => m.replace(/\bou\b/gi, '\u0000'));
+  return protegido
     .split(/\r?\n|;|\s+ou\s+|op[cç][aã]o\s*0?\d+\s*[:\-]/gi)
-    .map((p) => p.trim().replace(/^[-–•▫️\s]+/, ''))
+    .map((p) => p.replace(/\u0000/g, 'ou').trim().replace(/^[-–•▫️\s]+/, ''))
     .filter((p) => p.length > 2);
 }
 
@@ -399,8 +401,10 @@ function detectarEscolha(textoOriginal: string, dados: any): { escolheu: boolean
     if (/\bnao\b/.test(t) && !intencaoCompra) return { escolheu: false };
     return { escolheu: true, plano, forma };
   }
-  // So uma opcao disponivel: "sim, quero" ja define a escolha
-  if (opcoes.length === 1 && intencaoCompra && !pergunta && !hesitacao) {
+  // So uma opcao disponivel: precisa de intencao clara de compra ("quero", "fechado",
+  // "pode reservar"). "sim", "ok" ou "pode" sozinhos podem ser resposta a outra pergunta.
+  const intencaoForte = /\b(quero|vou querer|fechado|fechar|fecho|aceito|topo|bora|garantir|garanto|compro|comprar|reservar|reserva)\b/.test(t);
+  if (opcoes.length === 1 && intencaoForte && !pergunta && !hesitacao) {
     return { escolheu: true, plano: opcoes[0] };
   }
   return { escolheu: false };
@@ -445,6 +449,113 @@ function montarMensagemRepasseHumano(nome: string, plano: string | null | undefi
   return `Tudo certo${pn ? ', ' + pn : ''}! \u2705 ${dadosAtualizados ? 'Atualizei e confirmei seus dados.' : 'Seus dados estão confirmados.'}\n\n` +
     `Agora vou repassar seu atendimento para um especialista da nossa equipe. Ele vai finalizar com você, enviando o link de pagamento referente à sua escolha${(String(plano || '').trim() || String(forma || '').trim()) ? ` (${descreverPlano(plano, forma)})` : ''} em até ${PRAZO_LINK_PAGAMENTO}.\n\n` +
     `Assim que o pagamento for confirmado, suas fotos são liberadas para você. Obrigada pela confiança! \u{1F4F8}`;
+}
+
+/** Registra um alerta no Painel de Alertas (nunca interrompe o fluxo se falhar) */
+async function registrarAlerta(sb: any, a: {
+  tipo: string;
+  gravidade?: 'info' | 'atencao' | 'erro';
+  titulo: string;
+  detalhe?: string | null;
+  contato_nome?: string | null;
+  telefone?: string | null;
+}): Promise<void> {
+  try {
+    const { error } = await sb.from('alertas_sistema').insert({
+      tipo: a.tipo,
+      gravidade: a.gravidade || 'info',
+      titulo: a.titulo,
+      detalhe: a.detalhe ? String(a.detalhe).slice(0, 2000) : null,
+      contato_nome: a.contato_nome || null,
+      telefone: a.telefone || null,
+    });
+    if (error) console.warn('[Alerta] Nao registrado:', error.message);
+  } catch (e) {
+    console.warn('[Alerta] Falha ao registrar:', e);
+  }
+}
+
+// ============================================================================
+// IA COM SAIDA ESTRUTURADA (JSON)
+// A IA devolve {resposta, acao, dados, enviar_foto}. O sistema converte a acao
+// para os marcadores internos (###QUER_COMPRAR### etc.), assim todas as travas
+// e validacoes existentes continuam valendo, mas a IA nunca mais "esquece" ou
+// escreve um marcador no meio do texto.
+// ============================================================================
+
+const ACOES_IA = ['nenhuma', 'quer_comprar', 'compra_futura', 'agendamento_confirmado', 'sem_interesse', 'transferir_humano'];
+
+const FORMATO_SAIDA_JSON = `
+
+## FORMATO DA SUA RESPOSTA (OBRIGATORIO - tem prioridade sobre qualquer instrucao de marcador)
+Responda SEMPRE com um JSON valido, sem nenhum texto fora dele:
+{"resposta": "mensagem para o formando", "acao": "nenhuma", "dados": {}, "enviar_foto": false}
+- "resposta": SOMENTE o texto que sera enviado ao formando. NUNCA escreva marcadores (###...) aqui.
+- "acao": na maioria das mensagens use "nenhuma". Onde as instrucoes acima mandam incluir um
+  marcador, preencha a acao correspondente em vez de escrever o marcador:
+  ###QUER_COMPRAR###          -> "quer_comprar"  (dados: plano_escolhido, forma_pagamento_escolhida)
+  ###COMPRA_FUTURA###         -> "compra_futura" (dados: data no formato YYYY-MM-DD)
+  ###AGENDAMENTO_CONFIRMADO### -> "agendamento_confirmado" (dados: data YYYY-MM-DD, turno ou horario, local)
+  ###SEM_INTERESSE###         -> "sem_interesse"
+  ###OVERFLOW###              -> "transferir_humano"
+- "enviar_foto": true SOMENTE onde as instrucoes mandam usar ###ENVIAR_FOTO###; senao false.
+- As mesmas regras de quando usar cada marcador valem para a acao (ex: so use "quer_comprar"
+  quando o formando escolher claramente a opcao na mensagem atual).`;
+
+const SCHEMA_RESPOSTA_IA = {
+  type: 'object',
+  properties: {
+    resposta: { type: 'string' },
+    acao: { type: 'string' },
+    dados: {
+      type: 'object',
+      properties: {
+        plano_escolhido: { type: 'string' },
+        forma_pagamento_escolhida: { type: 'string' },
+        data: { type: 'string' },
+        turno: { type: 'string' },
+        horario: { type: 'string' },
+        local: { type: 'string' },
+      },
+    },
+    enviar_foto: { type: 'boolean' },
+  },
+  required: ['resposta', 'acao'],
+};
+
+/** Converte a resposta JSON da IA para o formato interno com marcadores. null = JSON invalido */
+function converterRespostaEstruturada(bruto: string): string | null {
+  let obj: any;
+  try {
+    obj = JSON.parse(String(bruto || '').replace(/```json|```/g, '').trim());
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj.resposta !== 'string') return null;
+  const d = obj.dados && typeof obj.dados === 'object' ? obj.dados : {};
+  const acao = ACOES_IA.includes(obj.acao) ? obj.acao : 'nenhuma';
+  let texto = obj.resposta.trim();
+
+  if (acao === 'quer_comprar') {
+    texto += `\n###QUER_COMPRAR###${JSON.stringify({
+      plano_escolhido: d.plano_escolhido || '',
+      forma_pagamento_escolhida: d.forma_pagamento_escolhida || '',
+    })}###FIM###`;
+  } else if (acao === 'compra_futura' && d.data) {
+    texto += `\n###COMPRA_FUTURA###${JSON.stringify({ data: d.data })}###FIM###`;
+  } else if (acao === 'agendamento_confirmado' && d.data) {
+    const ag: Record<string, string> = { data: d.data };
+    if (d.turno) ag.turno = d.turno;
+    if (d.horario) ag.horario = d.horario;
+    if (d.local) ag.local = d.local;
+    texto += `\n###AGENDAMENTO_CONFIRMADO###${JSON.stringify(ag)}###FIM###`;
+  } else if (acao === 'sem_interesse') {
+    texto += '\n###SEM_INTERESSE###';
+  } else if (acao === 'transferir_humano') {
+    texto += '\n###OVERFLOW###';
+  }
+  if (obj.enviar_foto === true) texto += '\n###ENVIAR_FOTO###';
+  return texto;
 }
 
 /**
@@ -1049,17 +1160,42 @@ Se a pergunta do contato nao estiver coberta em nenhuma base acima, diga que vai
     console.log('[Gemini] System Instruction:', systemInstruction.substring(0, 300) + '...');
     console.log('[Gemini] Historico tem', history.length, 'mensagens');
 
+    // Vendas usam o modelo mais capaz (lida melhor com objecoes); agendamento segue no lite
+    const nomeModelo = tipoAtendimento === 'venda_material' ? 'gemini-2.5-flash' : 'gemini-2.5-flash-lite';
     const genAI = new GoogleGenerativeAI(geminiApiKey);
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash-lite',
-      systemInstruction,
-    });
 
+    // 1a tentativa: saida estruturada (JSON)
+    try {
+      const modelJson = genAI.getGenerativeModel({
+        model: nomeModelo,
+        systemInstruction: systemInstruction + FORMATO_SAIDA_JSON,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          // deno-lint-ignore no-explicit-any
+          responseSchema: SCHEMA_RESPOSTA_IA as any,
+          temperature: 0.6,
+        },
+      });
+      const chatJson = modelJson.startChat({ history: history.length > 0 ? history : [] });
+      const resultJson = await chatJson.sendMessage(textoUsuario);
+      const bruto = resultJson.response.text();
+      const convertida = converterRespostaEstruturada(bruto);
+      if (convertida) {
+        console.log(`[Gemini] (${nomeModelo}, JSON) Resposta:`, convertida.substring(0, 120) + '...');
+        return convertida;
+      }
+      console.warn('[Gemini] JSON invalido, usando modo texto. Bruto:', bruto.substring(0, 200));
+    } catch (e) {
+      console.warn('[Gemini] Saida estruturada falhou, usando modo texto:', e);
+    }
+
+    // Plano B: modo texto com marcadores (comportamento anterior)
+    const model = genAI.getGenerativeModel({ model: nomeModelo, systemInstruction });
     const chat = model.startChat({ history: history.length > 0 ? history : [] });
     const result = await chat.sendMessage(textoUsuario);
     const response = result.response.text();
 
-    console.log('[Gemini] Resposta:', response.substring(0, 100) + '...');
+    console.log(`[Gemini] (${nomeModelo}, texto) Resposta:`, response.substring(0, 100) + '...');
     return response;
   } catch (err) {
     console.error('[Gemini] Erro:', err);
@@ -1395,7 +1531,9 @@ serve(async (req) => {
 case 'resposta_recebida': {
   const { telefone, campanha_id, texto_resposta, message_type, media_url, criar_conversa_se_ausente } = body;
   const tipoMensagemRecebida: string = message_type || 'text';
-  const ehMidiaRecebida = tipoMensagemRecebida !== 'text';
+  // Audio ja transcrito pelo webhook (texto comeca com 🎤) e tratado como texto normal
+  const ehAudioTranscrito = ['audio', 'ptt'].includes(tipoMensagemRecebida) && !/^\[/.test(String(texto_resposta || '').trim());
+  const ehMidiaRecebida = tipoMensagemRecebida !== 'text' && !ehAudioTranscrito;
 
   if (!telefone || !texto_resposta) {
     return new Response(JSON.stringify({ error: 'telefone e texto_resposta obrigatorios' }), {
@@ -1587,6 +1725,14 @@ pergunte qual prefere. Nao repita o aviso da prorrogacao inteiro, ele ja recebeu
         `👉 Confira o comprovante acima e finalize a liberacao do material.`;
 
       await enviarMidiaUazapi(NUMERO_VENDEDOR_MATERIAL, media_url, 'image', legendaComprovante);
+      await registrarAlerta(sb, {
+        tipo: 'comprovante',
+        gravidade: 'atencao',
+        titulo: 'Comprovante de pagamento recebido',
+        detalhe: `Confira o comprovante e libere o material. ${media_url}`,
+        contato_nome: nomeCompleto,
+        telefone,
+      });
 
       await sb.from('notificacoes_venda').insert({
         contato_campanha_id: dadosContato.id || null,
@@ -1635,9 +1781,22 @@ pergunte qual prefere. Nao repita o aviso da prorrogacao inteiro, ele ja recebeu
 
   // ===================== VENDA: ETAPA DE CONFERENCIA DE CPF / E-MAIL =====================
   const ehVendaMaterial = campanha.tipo_atendimento === 'venda_material';
-  const statusVendaAtual: string = dadosContato.status || '';
-  const vendaLegadoSemConferencia = ehVendaMaterial && statusVendaAtual === 'interessado_compra' && !dadosContato.dados_confirmados_em;
-  const emConferencia = ehVendaMaterial && !!dadosContato.id && (statusVendaAtual === 'confirmando_dados' || vendaLegadoSemConferencia);
+  // Contato que ficou como "interessado" num fluxo antigo, sem a conferencia de dados:
+  // NAO assume que ele escolheu. Volta para a conversa normal e a IA conduz a escolha de novo.
+  let statusVendaAtual: string = dadosContato.status || '';
+  if (ehVendaMaterial && dadosContato.id && statusVendaAtual === 'interessado_compra' && !dadosContato.dados_confirmados_em) {
+    await sb
+      .from('contatos_campanha')
+      .update({ status: 'em_conversa', plano_escolhido: null, forma_pagamento_escolhida: null })
+      .eq('id', dadosContato.id);
+    dadosContato.status = 'em_conversa';
+    dadosContato.plano_escolhido = null;
+    dadosContato.forma_pagamento_escolhida = null;
+    statusVendaAtual = 'em_conversa';
+    console.log(`[Processor] ${nomeCompleto}: status antigo "interessado_compra" sem conferencia - voltou para a conversa normal`);
+  }
+  const vendaLegadoSemConferencia = false;
+  const emConferencia = ehVendaMaterial && !!dadosContato.id && statusVendaAtual === 'confirmando_dados';
   let contextoConferencia = '';
 
   // Envia uma resposta "fixa" (sem IA) dentro do fluxo de venda e grava tudo
@@ -1718,6 +1877,15 @@ pergunte qual prefere. Nao repita o aviso da prorrogacao inteiro, ele ja recebeu
         dadosContato.forma_pagamento_escolhida || '',
         { telefone, cpf: cpfAtual, email: emailAtual }
       );
+
+      await registrarAlerta(sb, {
+        tipo: 'venda_pronta',
+        gravidade: 'atencao',
+        titulo: 'Venda pronta: enviar link de pagamento',
+        detalhe: `${descreverPlano(dadosContato.plano_escolhido, dadosContato.forma_pagamento_escolhida)} | CPF ${formatarCPF(cpfAtual)} | ${emailAtual}`,
+        contato_nome: nomeCompleto,
+        telefone,
+      });
 
       // Atendimento passa para o especialista humano (a IA para de responder)
       if (contactId) {
@@ -1861,7 +2029,7 @@ todas as fotos sao tratadas e em alta resolucao e conduza para a escolha da opca
 
 ## ATENCAO - O FORMANDO AINDA NAO ESCOLHEU (regra prioritaria)
 A mensagem atual dele ("${texto_resposta.slice(0, 200)}") NAO e uma escolha de opcao. NAO use
-###QUER_COMPRAR###, NAO diga "anotei sua escolha" e NAO peca CPF ou e-mail. Responda o que ele
+###QUER_COMPRAR### (nem a acao "quer_comprar"), NAO diga "anotei sua escolha" e NAO peca CPF ou e-mail. Responda o que ele
 disse e, se fizer sentido, pergunte qual das opcoes ele prefere.`;
     const refeita = await chamarGemini(
       sb,
@@ -1880,6 +2048,25 @@ disse e, se fizer sentido, pergunte qual das opcoes ele prefere.`;
     } else {
       escolhaBloqueada = true;
     }
+    await registrarAlerta(sb, {
+      tipo: 'trava_escolha',
+      gravidade: 'info',
+      titulo: 'Trava de escolha acionada',
+      detalhe: `A IA tentou registrar uma opcao de compra sem o formando escolher. Mensagem do formando: "${texto_resposta.slice(0, 300)}"`,
+      contato_nome: nomeCompleto,
+      telefone,
+    });
+  }
+
+  if (!respostaIA) {
+    await registrarAlerta(sb, {
+      tipo: 'ia_sem_resposta',
+      gravidade: 'erro',
+      titulo: 'A IA nao respondeu',
+      detalhe: `O Gemini nao devolveu resposta para a mensagem: "${String(texto_resposta).slice(0, 300)}". Responda manualmente.`,
+      contato_nome: nomeCompleto,
+      telefone,
+    });
   }
 
   if (respostaIA) {
@@ -1991,6 +2178,14 @@ disse e, se fizer sentido, pergunte qual das opcoes ele prefere.`;
               if (contactId) {
                 await sb.from('contacts').update({ revisao_humana: true }).eq('id', contactId);
               }
+              await registrarAlerta(sb, {
+                tipo: 'agendamento_conferir',
+                gravidade: 'atencao',
+                titulo: 'Agendamento para conferir',
+                detalhe: `A IA confirmou ${dados.data} (${dados.turno || dados.horario || 'sem turno'}), mas a data/turno nao aparece claramente nas mensagens do formando. Confira com ele.`,
+                contato_nome: nomeCompleto,
+                telefone,
+              });
             }
 
             const ok = await inserirAgendamento(sb, {

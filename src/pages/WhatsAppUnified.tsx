@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   Send,
@@ -22,7 +23,7 @@ import { sendMsg, sendMedia } from '../lib/uazapi';
 import { useToast } from '../hooks/useToast';
 import { ToastContainer } from '../components/Toast';
 import { WhatsAppConnection } from '../components/WhatsAppConnection';
-import type { Contact, Message, MessageTemplate, AppSettings } from '../types';
+import type { Contact, Message } from '../types';
 
 type ContactFilter = 'todos' | 'ia' | 'manual' | 'aguarda' | 'vendas' | 'agendados' | 'notas';
 
@@ -76,11 +77,8 @@ interface ContactWithLastMsg extends Contact {
 export function WhatsAppUnified() {
   const [contacts, setContacts] = useState<ContactWithLastMsg[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [templates, setTemplates] = useState<MessageTemplate[]>([]);
-  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
-  const [realtimeConnected, setRealtimeConnected] = useState(false);
 
   const [selectedContact, setSelectedContact] = useState<ContactWithLastMsg | null>(null);
   const [contactFilter, setContactFilter] = useState<ContactFilter>('todos');
@@ -132,38 +130,19 @@ const lastMessageIdRef = useRef<string | null>(null);
   const selectedContactRef = useRef<ContactWithLastMsg | null>(null);
   const { toasts, showToast, removeToast } = useToast();
 
-  // Funcao para processar mensagem via IA
-  const processWithAI = useCallback(async (contactId: string, messageContent: string) => {
-    console.log('[WhatsApp] Chamando IA para contato:', contactId, 'mensagem:', messageContent.substring(0, 50));
-    try {
-      const { data, error } = await supabase.functions.invoke('ai-chat', {
-        body: { contactId, message: messageContent, saveMessage: true }
-      });
-
-      if (error) {
-        console.error('[WhatsApp] Erro na Edge Function ai-chat:', error);
-        return null;
-      }
-
-      if (data?.response) {
-        console.log('[WhatsApp] Resposta da IA:', data.response.substring(0, 50));
-        // Atualiza lista de mensagens
-        fetchMessages(contactId);
-        fetchContacts(true);
-        return data.response;
-      }
-
-      if (data?.fallback) {
-        console.log('[WhatsApp] Resposta fallback:', data.fallback.substring(0, 50));
-        return data.fallback;
-      }
-
-      return null;
-    } catch (err) {
-      console.error('[WhatsApp] Erro ao processar com IA:', err);
-      return null;
+  // Abre direto a conversa quando vem de outra tela (ex: Painel de Alertas): #/whatsapp?tel=5592...
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const tel = (searchParams.get('tel') || '').replace(/\D/g, '');
+    if (!tel || contacts.length === 0) return;
+    const fim = tel.slice(-8);
+    const alvo = contacts.find((c) => String(c.phone || '').replace(/\D/g, '').endsWith(fim));
+    if (alvo) {
+      setSelectedContact(alvo);
+      setContactFilter('todos');
     }
-  }, []);
+    setSearchParams({}, { replace: true });
+  }, [contacts, searchParams]);
 
   // Mantem ref atualizada
   useEffect(() => {
@@ -172,8 +151,6 @@ const lastMessageIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     fetchContacts();
-    fetchTemplates();
-    fetchSettings();
 
     // Listen for contacts sync events
     const handleContactsSynced = () => {
@@ -216,11 +193,6 @@ const lastMessageIdRef = useRef<string | null>(null);
       if (bTime !== aTime) return bTime - aTime;
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
-    // Log para debug
-    console.log('[sortContactsByLastMessage] Input:', contactsList.length, 'Output:', sorted.length);
-    sorted.slice(0, 3).forEach((c, i) => {
-      console.log(`  [${i}] ${c.name} - lastMsg: ${c.lastMessage?.created_at || 'none'}`);
-    });
     return sorted;
   };
 
@@ -257,6 +229,8 @@ const lastMessageIdRef = useRef<string | null>(null);
             read: Boolean(rawData.read),
             created_at: String(rawData.created_at || new Date().toISOString()),
             status: (rawData.status as 'sent' | 'delivered' | 'read') || 'sent',
+            message_type: (rawData.message_type as Message['message_type']) || 'text',
+            media_url: (rawData.media_url as string | null) || null,
           };
 
           console.log('[WhatsApp Realtime] Mensagem processada:', newMsg.id, 'contact_id:', newMsg.contact_id, 'direction:', newMsg.direction);
@@ -280,10 +254,6 @@ const lastMessageIdRef = useRef<string | null>(null);
             console.log('[WhatsApp Realtime] Processando contato, prev length:', prev.length);
             console.log('[WhatsApp Realtime] newMsg.contact_id:', newMsg.contact_id, 'type:', typeof newMsg.contact_id);
 
-            // Log todos os IDs de contatos para comparar
-            prev.slice(0, 5).forEach(c => {
-              console.log('[WhatsApp Realtime] Contato na lista:', c.id, c.name, 'type:', typeof c.id);
-            });
 
             const existingContact = prev.find((c) => c.id === newMsg.contact_id);
             if (!existingContact) {
@@ -361,30 +331,44 @@ const lastMessageIdRef = useRef<string | null>(null);
         if (status === 'SUBSCRIBED') {
           console.log('[WhatsApp Realtime] Conectado com sucesso! Aguardando eventos...');
           realtimeConnectedRef.current = true;
-          setRealtimeConnected(true);
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
           console.error('[WhatsApp Realtime] Erro na conexao:', status);
           realtimeConnectedRef.current = false;
-          setRealtimeConnected(false);
         }
       });
 
-    // Polling de backup - SEMPRE ativo a cada 5 segundos como garantia
-    // O Realtime e instavel em alguns casos, entao polling garante funcionamento
+    // Tempo real e a fonte principal. Verificacao de garantia: a cada 60s com o
+    // tempo real conectado, ou a cada 10s se ele cair (antes era sempre a cada
+    // 5s, o que pesava a tela e consumia cota do Supabase). Aba escondida nao consulta.
+    let ultimaVerificacao = Date.now();
     const pollInterval = setInterval(() => {
-      console.log('[WhatsApp Polling] Atualizando...');
+      if (document.hidden) return;
+      const intervalo = realtimeConnectedRef.current ? 60000 : 10000;
+      if (Date.now() - ultimaVerificacao < intervalo) return;
+      ultimaVerificacao = Date.now();
       fetchContacts(true);
       const currentSelected = selectedContactRef.current;
       if (currentSelected) {
         fetchMessages(currentSelected.id, true);
       }
-    }, 5000); // 5 segundos - garante atualizacao mesmo se realtime falhar
+    }, 5000);
+
+    // Ao voltar para a aba, atualiza na hora
+    const aoVoltarParaAba = () => {
+      if (document.hidden) return;
+      ultimaVerificacao = Date.now();
+      fetchContacts(true);
+      const currentSelected = selectedContactRef.current;
+      if (currentSelected) fetchMessages(currentSelected.id, true);
+    };
+    document.addEventListener('visibilitychange', aoVoltarParaAba);
 
     return () => {
       console.log('[WhatsApp Realtime] Desconectando...');
       realtimeConnectedRef.current = false;
       supabase.removeChannel(channel);
       clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', aoVoltarParaAba);
     };
   }, []); // Removido selectedContact da dependencia - agora usa ref
 
@@ -547,38 +531,6 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
       .order('seq', { ascending: true });
     if (!error && data) setMessages(data as Message[]);
     if (!silent) setIsLoadingMessages(false);
-  };
-
-  const fetchTemplates = async () => {
-    const { data } = await supabase
-      .from('message_templates')
-      .select('*')
-      .eq('status', 'approved')
-      .order('name');
-    if (data) setTemplates(data as MessageTemplate[]);
-  };
-
-  const fetchSettings = async () => {
-    const { data } = await supabase.from('settings').select('*');
-    if (data) {
-      const settingsMap: Record<string, string> = {};
-      data.forEach((s) => {
-        settingsMap[s.key] = s.value;
-      });
-      setSettings({
-        min_delay_seconds: parseInt(settingsMap.min_delay_seconds || '2'),
-        max_delay_seconds: parseInt(settingsMap.max_delay_seconds || '8'),
-        batch_size: parseInt(settingsMap.batch_size || '50'),
-        batch_pause_minutes: parseInt(settingsMap.batch_pause_minutes || '5'),
-        whatsapp_connected: settingsMap.whatsapp_connected === 'true',
-        ai_enabled: settingsMap.ai_enabled === 'true',
-        nome_agente: settingsMap.nome_agente || 'Sofia',
-        responder_automaticamente: settingsMap.responder_automaticamente === 'true',
-        usar_base_conhecimento: settingsMap.usar_base_conhecimento === 'true',
-        permitir_agendar: settingsMap.permitir_agendar === 'true',
-        system_prompt_base: settingsMap.system_prompt_base || '',
-      });
-    }
   };
 
   const normalizePhone = (phone: string): string => {
@@ -910,45 +862,6 @@ fetchMessages(selectedContact.id);
     setShowAgendarMensagemModal(false);
   };
 
-  const handleSaveSettings = async () => {
-    const updates = [
-      { key: 'min_delay_seconds', value: tempSettings.min_delay_seconds.toString() },
-      { key: 'max_delay_seconds', value: tempSettings.max_delay_seconds.toString() },
-      { key: 'batch_size', value: tempSettings.batch_size.toString() },
-      { key: 'batch_pause_minutes', value: tempSettings.batch_pause_minutes.toString() },
-    ];
-
-    for (const update of updates) {
-      await supabase.from('settings').update({ value: update.value }).eq('key', update.key);
-    }
-
-    await fetchSettings();
-    setEditingSettings(false);
-    showToast('Configuracoes salvas!', 'success');
-  };
-
-  const handleToggleFlow = async (flow: AIFlow) => {
-    const { error } = await supabase
-      .from('ai_flows')
-      .update({ active: !flow.active })
-      .eq('id', flow.id);
-
-    if (!error) {
-      setAiFlows((prev) =>
-        prev.map((f) => (f.id === flow.id ? { ...f, active: !f.active } : f))
-      );
-    }
-  };
-
-  const useTemplate = (template: MessageTemplate) => {
-    let content = template.content;
-    if (selectedContact) {
-      content = content.replace(/\{\{nome\}\}/g, (selectedContact.name || '').split(' ')[0]);
-      content = content.replace(/\{\{curso\}\}/g, selectedContact.course || '');
-    }
-    setMessageInput(content);
-  };
-
   const formatCurrency = (value?: number | null): string | null => {
     if (value === null || value === undefined) return null;
     return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -1192,12 +1105,9 @@ const formatTime = (dateStr: string) => {
                                 </span>
                               )}
                               {!!contact.observacao && (
-                                <StickyNote
-                                  size={13}
-                                  className="flex-shrink-0"
-                                  style={{ color: '#F59E0B' }}
-                                  title={contact.observacao}
-                                />
+                                <span title={contact.observacao} className="flex-shrink-0 inline-flex">
+                                  <StickyNote size={13} style={{ color: '#F59E0B' }} />
+                                </span>
                               )}
                               <span
                                 className="badge flex-shrink-0"
@@ -1455,6 +1365,9 @@ const formatTime = (dateStr: string) => {
                                   {isAI ? 'IA' : 'Voce'}
                                 </span>
                               </div>
+                            )}
+                            {(msg.message_type === 'audio' || msg.message_type === 'ptt') && msg.media_url && (
+                              <audio controls preload="none" src={msg.media_url} className="mb-1" style={{ maxWidth: '240px', height: '36px' }} />
                             )}
                             {msg.message_type === 'image' && msg.media_url && (
                               <a href={msg.media_url} target="_blank" rel="noopener noreferrer">
