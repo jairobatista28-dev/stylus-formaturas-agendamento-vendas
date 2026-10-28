@@ -54,6 +54,10 @@ type CampanhaInfo = {
   formas_pagamento?: string | null;
 };
 
+type VendaResumo = { id: string; valor: number; forma: string | null; data: string; origem: string };
+
+const FORMAS_PAGAMENTO = ['Pix', 'Dinheiro', 'Cartão 2x', 'Cartão AC 2x', 'DCC', 'Boleto'];
+
 /** Divide uma lista em blocos (evita URL gigante e o limite de 1000 linhas do Supabase) */
 function emBlocos<T>(lista: T[], tamanho = 150): T[][] {
   const blocos: T[][] = [];
@@ -66,6 +70,7 @@ interface ContactWithLastMsg extends Contact {
   lastAppointment?: { date: string; shift: string; status: string };
   tipo_atendimento_campanha?: string;
   vendaProdutoConcluida?: boolean;
+  vendaRegistrada?: { id: string; valor: number; forma: string | null; data: string; origem: string } | null;
   campanhaContatoId?: string;
   valorTabela?: number | null;
   valorOferecido?: number | null;
@@ -102,6 +107,18 @@ export function WhatsAppUnified() {
   });
   const [savingSchedule, setSavingSchedule] = useState(false);
 
+  const [showVendaModal, setShowVendaModal] = useState(false);
+  const [salvandoVenda, setSalvandoVenda] = useState(false);
+  const [vendaForm, setVendaForm] = useState({
+    valor: '',
+    forma: 'Pix',
+    data: '',
+    formando: '',
+    projeto: '',
+    instituicao: '',
+    curso: '',
+    contratoCtt: '',
+  });
   const [showNotaModal, setShowNotaModal] = useState(false);
   const [notaInput, setNotaInput] = useState('');
   const [savingNota, setSavingNota] = useState(false);
@@ -126,6 +143,7 @@ const lastMessageIdRef = useRef<string | null>(null);
     ids: number;
     agendamentos: Map<string, { date: string; shift: string; status: string }>;
     campanhas: Map<string, CampanhaInfo>;
+    vendas: Map<string, VendaResumo>;
   } | null>(null);
   const selectedContactRef = useRef<ContactWithLastMsg | null>(null);
   const { toasts, showToast, removeToast } = useToast();
@@ -411,6 +429,7 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
 
       let lastAptByContact = cache?.agendamentos || new Map<string, { date: string; shift: string; status: string }>();
       let campanhaByPhone = cache?.campanhas || new Map<string, CampanhaInfo>();
+      let vendasPorChave = cache?.vendas || new Map<string, VendaResumo>();
 
       if (precisaRecarregar) {
         // Agendamentos: busca em blocos de contatos (antes era uma consulta so com
@@ -476,6 +495,29 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
           });
         });
 
+        // Vendas registradas (marcacao VD): por contato e por telefone. Inclui
+        // clientes fora da base que foram vendidos manualmente.
+        const novasVendas = new Map<string, VendaResumo>();
+        let falhouVendas = false;
+        for (let inicio = 0; inicio < 20000; inicio += 1000) {
+          const { data: vs, error: errV } = await supabase
+            .from('vendas')
+            .select('id, contact_id, telefone, valor_total, forma_pagamento, data_venda, origem')
+            .order('data_venda', { ascending: false })
+            .range(inicio, inicio + 999);
+          if (errV) {
+            falhouVendas = true;
+            break;
+          }
+          (vs || []).forEach((v: any) => {
+            const resumo: VendaResumo = { id: v.id, valor: Number(v.valor_total) || 0, forma: v.forma_pagamento, data: v.data_venda, origem: v.origem };
+            if (v.contact_id && !novasVendas.has(`c:${v.contact_id}`)) novasVendas.set(`c:${v.contact_id}`, resumo);
+            if (v.telefone && !novasVendas.has(`t:${v.telefone}`)) novasVendas.set(`t:${v.telefone}`, resumo);
+          });
+          if (!vs || vs.length < 1000) break;
+        }
+        if (!falhouVendas || !cache) vendasPorChave = novasVendas;
+
         // Se uma consulta falhar, mantem os dados anteriores (nao some com as marcacoes)
         if (!falhouApt || !cache) lastAptByContact = novosAgendamentos;
         if (!falhouCamp || !cache) campanhaByPhone = novasCampanhas;
@@ -484,6 +526,7 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
           ids: contactIds.length,
           agendamentos: lastAptByContact,
           campanhas: campanhaByPhone,
+          vendas: vendasPorChave,
         };
       }
 
@@ -494,12 +537,14 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
 
       const contactsWithMsgs = (contactsData as Contact[]).map((contact) => {
         const campanhaData = campanhaByPhone.get(contact.phone);
+        const venda = vendasPorChave.get(`c:${contact.id}`) || vendasPorChave.get(`t:${contact.phone}`) || null;
         return {
           ...contact,
           contract_number: contact.contract_number || campanhaData?.numero_contrato || undefined,
           course: contact.course || campanhaData?.curso || undefined,
           tipo_atendimento_campanha: campanhaData?.tipo_atendimento,
-          vendaProdutoConcluida: campanhaData?.status === 'comprou',
+          vendaProdutoConcluida: campanhaData?.status === 'comprou' || !!venda,
+          vendaRegistrada: venda,
           campanhaContatoId: campanhaData?.id,
           valorTabela: campanhaData?.valor_tabela,
           valorOferecido: campanhaData?.valor_oferecido,
@@ -753,30 +798,105 @@ fetchMessages(selectedContact.id);
     }
   };
 
-  const handleMarkAsSold = async () => {
+  // ===================== REGISTRAR VENDA (marcacao VD) =====================
+  // Funciona para formando da campanha e para cliente fora da base: a venda vai
+  // para a tabela "vendas" e entra no Funil de Vendas.
+  const handleMarkAsSold = () => {
     if (!selectedContact) return;
+    setVendaForm({
+      valor: selectedContact.valorOferecido ? String(selectedContact.valorOferecido) : '',
+      forma: 'Pix',
+      data: new Date().toLocaleDateString('en-CA'),
+      formando: selectedContact.name && !/^\+?\d+$/.test(selectedContact.name) ? selectedContact.name : '',
+      projeto: selectedContact.contract_number || '',
+      instituicao: '',
+      curso: selectedContact.course || '',
+      contratoCtt: '',
+    });
+    setShowVendaModal(true);
+  };
 
-    if (!selectedContact.campanhaContatoId) {
-      showToast('Este contato nao esta vinculado a uma campanha de vendas', 'error');
+  const handleSalvarVenda = async () => {
+    if (!selectedContact) return;
+    const valor = Number(String(vendaForm.valor).replace(/\./g, '').replace(',', '.'));
+    if (!valor || valor <= 0) {
+      showToast('Informe o valor da venda', 'error');
       return;
     }
-
-    const { error } = await supabase
-      .from('contatos_campanha')
-      .update({ status: 'comprou' })
-      .eq('id', selectedContact.campanhaContatoId);
-
+    if (!vendaForm.formando.trim()) {
+      showToast('Informe o nome do formando', 'error');
+      return;
+    }
+    setSalvandoVenda(true);
+    const colunaPorForma: Record<string, string> = {
+      'Pix': 'valor_pix',
+      'Dinheiro': 'valor_dinheiro',
+      'Cartão 2x': 'valor_cartao',
+      'Cartão AC 2x': 'valor_cartao_ac',
+      'DCC': 'valor_dcc',
+      'Boleto': 'valor_boleto',
+    };
+    const { data: nova, error } = await supabase
+      .from('vendas')
+      .insert({
+        data_venda: vendaForm.data,
+        formando: vendaForm.formando.trim().toUpperCase(),
+        telefone: selectedContact.phone,
+        contact_id: selectedContact.id,
+        contato_campanha_id: selectedContact.campanhaContatoId || null,
+        projeto: vendaForm.projeto.trim() || null,
+        instituicao: vendaForm.instituicao.trim() || null,
+        curso: vendaForm.curso.trim() || null,
+        contrato_ctt: vendaForm.contratoCtt.trim() || null,
+        valor_total: valor,
+        [colunaPorForma[vendaForm.forma] || 'valor_pix']: valor,
+        forma_pagamento: vendaForm.forma,
+        vendedor: 'JAIRO',
+        origem: selectedContact.campanhaContatoId ? 'campanha' : 'manual',
+      })
+      .select('id')
+      .single();
     if (error) {
-      showToast('Erro ao marcar como vendido: ' + error.message, 'error');
+      setSalvandoVenda(false);
+      showToast(
+        error.message.includes('contrato_ctt') ? 'Esse contrato CTT já está registrado em outra venda' : 'Erro ao registrar venda: ' + error.message,
+        'error'
+      );
       return;
     }
+    if (selectedContact.campanhaContatoId) {
+      await supabase.from('contatos_campanha').update({ status: 'comprou' }).eq('id', selectedContact.campanhaContatoId);
+    }
+    setSalvandoVenda(false);
+    setShowVendaModal(false);
 
-    const updated = { ...selectedContact, vendaProdutoConcluida: true };
+    const resumo: VendaResumo = { id: nova?.id, valor, forma: vendaForm.forma, data: vendaForm.data, origem: selectedContact.campanhaContatoId ? 'campanha' : 'manual' };
+    const updated = { ...selectedContact, vendaProdutoConcluida: true, vendaRegistrada: resumo };
     setSelectedContact(updated);
-    setContacts((prev) =>
-      prev.map((c) => (c.id === selectedContact.id ? updated : c))
-    );
-    showToast('Marcado como Vendido!', 'success');
+    setContacts((prev) => prev.map((c) => (c.id === selectedContact.id ? updated : c)));
+    fetchContacts(true, true);
+    showToast('Venda registrada! Já conta no Funil de Vendas.', 'success');
+  };
+
+  const handleDesfazerVenda = async () => {
+    if (!selectedContact) return;
+    const venda = selectedContact.vendaRegistrada;
+    if (venda?.origem === 'planilha') {
+      showToast('Essa venda veio da planilha de acerto e não pode ser desfeita por aqui', 'error');
+      return;
+    }
+    if (!window.confirm(`Desfazer a venda de ${selectedContact.name}? Ela sai do Funil de Vendas.`)) return;
+    if (venda?.id) {
+      await supabase.from('vendas').delete().eq('id', venda.id);
+    }
+    if (selectedContact.campanhaContatoId) {
+      await supabase.from('contatos_campanha').update({ status: 'em_conversa' }).eq('id', selectedContact.campanhaContatoId);
+    }
+    const updated = { ...selectedContact, vendaProdutoConcluida: false, vendaRegistrada: null };
+    setSelectedContact(updated);
+    setContacts((prev) => prev.map((c) => (c.id === selectedContact.id ? updated : c)));
+    fetchContacts(true, true);
+    showToast('Venda desfeita', 'success');
   };
 
   const handleOpenNota = () => {
@@ -1207,11 +1327,21 @@ const formatTime = (dateStr: string) => {
                           <CheckCircle2 size={11} />
                           <span>
                             Vendido
-                            {(formatCurrency(selectedContact.valorOferecido) || formatCurrency(selectedContact.valorTabela)) && (
-                              <> · {formatCurrency(selectedContact.valorOferecido) || formatCurrency(selectedContact.valorTabela)}</>
-                            )}
-                            {(selectedContact.formaPagamentoEscolhida || selectedContact.formasPagamento) && (
-                              <> · {selectedContact.formaPagamentoEscolhida || selectedContact.formasPagamento}</>
+                            {selectedContact.vendaRegistrada ? (
+                              <>
+                                {' · '}{formatCurrency(selectedContact.vendaRegistrada.valor)}
+                                {selectedContact.vendaRegistrada.forma && <> · {selectedContact.vendaRegistrada.forma}</>}
+                                {' · '}{selectedContact.vendaRegistrada.data.split('-').reverse().join('/')}
+                              </>
+                            ) : (
+                              <>
+                                {(formatCurrency(selectedContact.valorOferecido) || formatCurrency(selectedContact.valorTabela)) && (
+                                  <> · {formatCurrency(selectedContact.valorOferecido) || formatCurrency(selectedContact.valorTabela)}</>
+                                )}
+                                {(selectedContact.formaPagamentoEscolhida || selectedContact.formasPagamento) && (
+                                  <> · {selectedContact.formaPagamentoEscolhida || selectedContact.formasPagamento}</>
+                                )}
+                              </>
                             )}
                           </span>
                         </div>
@@ -1235,14 +1365,25 @@ const formatTime = (dateStr: string) => {
                       <Bot size={12} />
                       Para IA
                     </button>
-                    {!selectedContact.vendaProdutoConcluida && (
+                    {!selectedContact.vendaProdutoConcluida ? (
                       <button
                         onClick={handleMarkAsSold}
                         className="btn-secondary"
                         style={{ padding: '6px 10px', fontSize: '11px', backgroundColor: COR_VD, color: 'white' }}
+                        title="Registrar a venda deste contato (entra no Funil de Vendas)"
                       >
                         <CheckCircle2 size={12} />
                         Vendido
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleDesfazerVenda}
+                        className="btn-secondary"
+                        style={{ padding: '6px 10px', fontSize: '11px' }}
+                        title="Desfazer a marcação de vendido"
+                      >
+                        <X size={12} />
+                        Desfazer VD
                       </button>
                     )}
                     <button
@@ -1589,6 +1730,124 @@ const formatTime = (dateStr: string) => {
               >
                 {savingContact ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />}
                 {savingContact ? 'Salvando...' : 'Criar contato'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Registrar Venda */}
+      {showVendaModal && selectedContact && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ backgroundColor: 'rgba(0,0,0,0.6)' }}
+          onClick={() => setShowVendaModal(false)}
+        >
+          <div
+            className="rounded-lg p-5 w-full max-w-lg space-y-4"
+            style={{ backgroundColor: 'var(--bg-surface)', border: '1px solid var(--border)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                  Registrar venda
+                </h3>
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {selectedContact.campanhaContatoId ? 'Formando da campanha' : 'Cliente fora da base'} · {formatPhoneDisplay(selectedContact.phone)}
+                </p>
+              </div>
+              <button onClick={() => setShowVendaModal(false)} className="btn-icon">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2">
+                <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>Nome do formando *</label>
+                <input
+                  value={vendaForm.formando}
+                  onChange={(e) => setVendaForm({ ...vendaForm, formando: e.target.value })}
+                  className="input-dark w-full"
+                  placeholder="Nome completo"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>Valor total (R$) *</label>
+                <input
+                  value={vendaForm.valor}
+                  onChange={(e) => setVendaForm({ ...vendaForm, valor: e.target.value })}
+                  className="input-dark w-full"
+                  placeholder="Ex: 800"
+                  inputMode="decimal"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>Forma de pagamento</label>
+                <select
+                  value={vendaForm.forma}
+                  onChange={(e) => setVendaForm({ ...vendaForm, forma: e.target.value })}
+                  className="input-dark w-full"
+                >
+                  {FORMAS_PAGAMENTO.map((f) => (
+                    <option key={f} value={f}>{f}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>Data da venda</label>
+                <input
+                  type="date"
+                  value={vendaForm.data}
+                  onChange={(e) => setVendaForm({ ...vendaForm, data: e.target.value })}
+                  className="input-dark w-full"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>Projeto (contrato da turma)</label>
+                <input
+                  value={vendaForm.projeto}
+                  onChange={(e) => setVendaForm({ ...vendaForm, projeto: e.target.value })}
+                  className="input-dark w-full"
+                  placeholder="Ex: 8022/2023"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>Instituição</label>
+                <input
+                  value={vendaForm.instituicao}
+                  onChange={(e) => setVendaForm({ ...vendaForm, instituicao: e.target.value })}
+                  className="input-dark w-full"
+                  placeholder="Ex: Ulbra"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>Curso</label>
+                <input
+                  value={vendaForm.curso}
+                  onChange={(e) => setVendaForm({ ...vendaForm, curso: e.target.value })}
+                  className="input-dark w-full"
+                  placeholder="Ex: Direito"
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>Contrato CTT (opcional)</label>
+                <input
+                  value={vendaForm.contratoCtt}
+                  onChange={(e) => setVendaForm({ ...vendaForm, contratoCtt: e.target.value })}
+                  className="input-dark w-full"
+                  placeholder="Ex: NCZS25041716 (evita contar a venda duas vezes na planilha)"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button onClick={() => setShowVendaModal(false)} className="btn-secondary flex-1">
+                Cancelar
+              </button>
+              <button onClick={handleSalvarVenda} disabled={salvandoVenda} className="btn-primary flex-1">
+                {salvandoVenda ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                {salvandoVenda ? 'Registrando...' : 'Registrar venda'}
               </button>
             </div>
           </div>

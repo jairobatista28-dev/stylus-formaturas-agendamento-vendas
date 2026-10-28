@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronDown, ChevronUp, FileSpreadsheet, Loader2, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { useToast } from '../hooks/useToast';
+import { ToastContainer } from '../components/Toast';
 
 /**
  * FUNIL DE VENDAS - material fotografico
@@ -22,6 +24,94 @@ interface Linha {
   valor_oferecido: number | string | null;
 }
 
+interface Venda {
+  id: string;
+  data_venda: string;
+  formando: string;
+  instituicao: string | null;
+  curso: string | null;
+  projeto: string | null;
+  valor_total: number;
+  valor_pix: number;
+  valor_dinheiro: number;
+  valor_cartao: number;
+  valor_cartao_ac: number;
+  valor_dcc: number;
+  valor_boleto: number;
+  forma_pagamento: string | null;
+  origem: 'manual' | 'campanha' | 'planilha';
+  contato_campanha_id: string | null;
+  acerto: string | null;
+}
+
+const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+
+function dataBR(iso: string): string {
+  const [a, m, d] = String(iso || '').split('-');
+  return d ? `${d}/${m}/${a}` : iso;
+}
+
+/** Le uma planilha de acerto (mesmo layout do Acerto_Jairo_*.xlsx) e devolve as vendas */
+async function lerPlanilhaAcerto(arquivo: File): Promise<Record<string, unknown>[]> {
+  const XLSX = await import('xlsx');
+  const wb = XLSX.read(await arquivo.arrayBuffer(), { type: 'array' });
+  const linhas: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null });
+  const acerto = String((linhas.find((l) => l.some((c) => /ACERTO/i.test(String(c ?? '')))) || []).find((c) => /ACERTO/i.test(String(c ?? ''))) || arquivo.name).trim();
+  const iHeader = linhas.findIndex((l) => l.some((c) => String(c ?? '').trim().toUpperCase() === 'FORMANDO'));
+  if (iHeader < 0) throw new Error('Não encontrei a linha de cabeçalho com a coluna FORMANDO');
+  const cab = linhas[iHeader].map((c) => String(c ?? '').trim().toUpperCase());
+  const col = (nome: string) => cab.findIndex((c) => c === nome);
+  const num = (v: unknown) => (typeof v === 'number' ? v : Number(String(v ?? '').replace(/\./g, '').replace(',', '.')) || 0);
+  const vendas: Record<string, unknown>[] = [];
+  for (const l of linhas.slice(iHeader + 1)) {
+    const formando = String(l[col('FORMANDO')] ?? '').trim();
+    const ctt = String(l[col('CONTRATO CTT')] ?? '').trim();
+    const total = num(l[col('TOTAL')]);
+    const dv = l[col('DATA DA VENDA')];
+    if (!formando || !ctt || total <= 0 || dv === null || dv === '') continue;
+    let data = '';
+    if (typeof dv === 'number') {
+      const d = new Date(Date.UTC(1899, 11, 30) + dv * 86400000);
+      data = d.toISOString().slice(0, 10);
+    } else {
+      const m = String(dv).match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+      if (!m) continue;
+      data = `${m[3].length === 2 ? '20' + m[3] : m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    }
+    const v = {
+      pix: num(l[col('PIX')]),
+      din: num(l[col('DINHEIRO')]),
+      c2: num(l[col('CARTAO 2X')]),
+      cac: num(l[col('CARTAO AC 2X')]),
+      dcc: num(l[col('DCC')]),
+      bol: num(l[col('BOLETO')]),
+    };
+    const formas = [
+      v.pix && 'Pix', v.din && 'Dinheiro', v.c2 && 'Cartão 2x', v.cac && 'Cartão AC 2x', v.dcc && 'DCC', v.bol && 'Boleto',
+    ].filter(Boolean).join(' + ');
+    vendas.push({
+      data_venda: data,
+      formando,
+      projeto: String(l[col('PROJETO')] ?? '').trim() || null,
+      instituicao: String(l[col('INSTITUIÇÃO')] ?? l[col('INSTITUICAO')] ?? '').trim() || null,
+      curso: String(l[col('CURSO')] ?? '').trim() || null,
+      contrato_ctt: ctt,
+      valor_total: total,
+      valor_pix: v.pix,
+      valor_dinheiro: v.din,
+      valor_cartao: v.c2,
+      valor_cartao_ac: v.cac,
+      valor_dcc: v.dcc,
+      valor_boleto: v.bol,
+      forma_pagamento: formas || null,
+      vendedor: String(l[col('VENDEDOR')] ?? '').trim() || null,
+      origem: 'planilha',
+      acerto,
+    });
+  }
+  return vendas;
+}
+
 interface Campanha {
   id: string;
   nome: string;
@@ -35,7 +125,8 @@ const abordado = (l: Linha) => !STATUS_NAO_ABORDADO.includes(l.status || 'penden
 const respondeu = (l: Linha) => !!l.interagiu_em || STATUS_RESPONDEU.includes(l.status || '');
 const escolheu = (l: Linha) => !!l.plano_escolhido || STATUS_ESCOLHEU.includes(l.status || '');
 const confirmou = (l: Linha) => !!l.dados_confirmados_em || l.status === 'comprou';
-const vendeu = (l: Linha) => l.status === 'comprou';
+let idsComVenda = new Set<string>();
+const vendeu = (l: Linha) => l.status === 'comprou' || idsComVenda.has(l.id);
 
 function pct(parte: number, total: number): string {
   if (!total) return '0%';
@@ -47,20 +138,17 @@ function moeda(v: number): string {
   return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 });
 }
 
-function valorNumerico(v: number | string | null): number {
-  if (v === null || v === undefined) return 0;
-  if (typeof v === 'number') return v;
-  const m = String(v).match(/\d{1,3}(?:\.\d{3})*,\d{2}|\d+(?:\.\d+)?/);
-  if (!m) return 0;
-  return Number(m[0].includes(',') ? m[0].replace(/\./g, '').replace(',', '.') : m[0]) || 0;
-}
-
 export function FunilVendas() {
   const [campanhas, setCampanhas] = useState<Campanha[]>([]);
   const [linhas, setLinhas] = useState<Linha[]>([]);
   const [campanhaSel, setCampanhaSel] = useState<string>('todas');
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
+  const [vendas, setVendas] = useState<Venda[]>([]);
+  const [mostrarLista, setMostrarLista] = useState(false);
+  const [importando, setImportando] = useState(false);
+  const arquivoRef = useRef<HTMLInputElement>(null);
+  const { toasts, showToast, removeToast } = useToast();
 
   async function carregar() {
     setCarregando(true);
@@ -96,17 +184,108 @@ export function FunilVendas() {
       if (!data || data.length < PAGINA) break;
     }
     setLinhas(todas);
+
+    // Vendas realizadas (fonte oficial do total vendido)
+    const todasVendas: Venda[] = [];
+    for (let inicio = 0; inicio < 50000; inicio += 1000) {
+      const { data, error } = await supabase
+        .from('vendas')
+        .select('id, data_venda, formando, instituicao, curso, projeto, valor_total, valor_pix, valor_dinheiro, valor_cartao, valor_cartao_ac, valor_dcc, valor_boleto, forma_pagamento, origem, contato_campanha_id, acerto')
+        .order('data_venda', { ascending: false })
+        .range(inicio, inicio + 999);
+      if (error) {
+        setErro(
+          error.message.includes('vendas')
+            ? 'A tabela de vendas ainda não existe. Rode a migration 20261102120000_vendas_realizadas no bolt.'
+            : 'Não foi possível carregar as vendas: ' + error.message
+        );
+        break;
+      }
+      todasVendas.push(...((data || []) as Venda[]));
+      if (!data || data.length < 1000) break;
+    }
+    setVendas(todasVendas);
     setCarregando(false);
+  }
+
+  async function importarPlanilha(arquivo: File) {
+    setImportando(true);
+    try {
+      const novas = await lerPlanilhaAcerto(arquivo);
+      if (!novas.length) {
+        showToast('Nenhuma venda encontrada na planilha', 'error');
+        return;
+      }
+      const { error } = await supabase.from('vendas').upsert(novas, { onConflict: 'contrato_ctt', ignoreDuplicates: true });
+      if (error) throw new Error(error.message);
+      const { data: vinc } = await supabase.rpc('vincular_vendas');
+      showToast(
+        `${novas.length} vendas lidas (as já registradas foram ignoradas). ${vinc?.sem_vinculo ?? 0} sem formando correspondente na base.`,
+        'success'
+      );
+      await carregar();
+    } catch (e) {
+      showToast('Erro ao importar: ' + (e instanceof Error ? e.message : String(e)), 'error');
+    } finally {
+      setImportando(false);
+      if (arquivoRef.current) arquivoRef.current.value = '';
+    }
   }
 
   useEffect(() => {
     carregar();
   }, []);
 
+  // Formandos que tem venda registrada contam como vendidos, mesmo sem a marcacao no status
+  idsComVenda = useMemo(() => new Set(vendas.map((v) => v.contato_campanha_id).filter(Boolean) as string[]), [vendas]);
+
   const base = useMemo(
     () => (campanhaSel === 'todas' ? linhas : linhas.filter((l) => l.campanha_id === campanhaSel)),
-    [linhas, campanhaSel]
+    [linhas, campanhaSel, idsComVenda]
   );
+
+  const campanhaDoContato = useMemo(() => {
+    const m = new Map<string, string>();
+    linhas.forEach((l) => m.set(l.id, l.campanha_id));
+    return m;
+  }, [linhas]);
+
+  const vendasFiltradas = useMemo(
+    () => (campanhaSel === 'todas' ? vendas : vendas.filter((v) => v.contato_campanha_id && campanhaDoContato.get(v.contato_campanha_id) === campanhaSel)),
+    [vendas, campanhaSel, campanhaDoContato]
+  );
+
+  const resumoVendas = useMemo(() => {
+    const total = vendasFiltradas.reduce((s, v) => s + Number(v.valor_total || 0), 0);
+    const daBase = vendasFiltradas.filter((v) => v.contato_campanha_id);
+    const fora = vendasFiltradas.filter((v) => !v.contato_campanha_id);
+    const soma = (lista: Venda[]) => lista.reduce((s, v) => s + Number(v.valor_total || 0), 0);
+    const porMes = new Map<string, { qtd: number; valor: number }>();
+    vendasFiltradas.forEach((v) => {
+      const chave = String(v.data_venda).slice(0, 7);
+      const atual = porMes.get(chave) || { qtd: 0, valor: 0 };
+      atual.qtd++;
+      atual.valor += Number(v.valor_total || 0);
+      porMes.set(chave, atual);
+    });
+    const formas = [
+      { nome: 'Pix', valor: vendasFiltradas.reduce((s, v) => s + Number(v.valor_pix || 0), 0) },
+      { nome: 'Cartão 2x', valor: vendasFiltradas.reduce((s, v) => s + Number(v.valor_cartao || 0), 0) },
+      { nome: 'Cartão AC 2x', valor: vendasFiltradas.reduce((s, v) => s + Number(v.valor_cartao_ac || 0), 0) },
+      { nome: 'Dinheiro', valor: vendasFiltradas.reduce((s, v) => s + Number(v.valor_dinheiro || 0), 0) },
+      { nome: 'DCC', valor: vendasFiltradas.reduce((s, v) => s + Number(v.valor_dcc || 0), 0) },
+      { nome: 'Boleto', valor: vendasFiltradas.reduce((s, v) => s + Number(v.valor_boleto || 0), 0) },
+    ].filter((f) => f.valor > 0);
+    return {
+      qtd: vendasFiltradas.length,
+      total,
+      ticket: vendasFiltradas.length ? total / vendasFiltradas.length : 0,
+      daBase: { qtd: daBase.length, valor: soma(daBase) },
+      fora: { qtd: fora.length, valor: soma(fora) },
+      porMes: [...porMes.entries()].sort((a, b) => b[0].localeCompare(a[0])),
+      formas,
+    };
+  }, [vendasFiltradas]);
 
   const etapas = useMemo(() => {
     const total = base.length;
@@ -125,13 +304,11 @@ export function FunilVendas() {
     const respondentes = base.filter(respondeu);
     const comFoto = respondentes.filter((l) => !!l.foto_enviada_em);
     const semFoto = respondentes.filter((l) => !l.foto_enviada_em);
-    const vendidos = base.filter(vendeu);
     return {
       semInteresse: base.filter((l) => l.status === 'sem_interesse').length,
       compraFutura: base.filter((l) => l.status === 'compra_futura').length,
       aguardandoLink: base.filter((l) => l.status === 'interessado_compra').length,
       comEspecialista: base.filter((l) => l.status === 'transferido_humano').length,
-      faturamento: vendidos.reduce((soma, l) => soma + valorNumerico(l.valor_oferecido), 0),
       foto: {
         com: comFoto.length,
         comVendas: comFoto.filter(vendeu).length,
@@ -172,12 +349,13 @@ export function FunilVendas() {
         };
       })
       .filter((c) => c.total > 0);
-  }, [campanhas, linhas]);
+  }, [campanhas, linhas, idsComVenda]);
 
   const maior = etapas[0]?.qtd || 1;
 
   return (
     <div className="space-y-5">
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>
@@ -201,6 +379,22 @@ export function FunilVendas() {
               </option>
             ))}
           </select>
+          <input
+            ref={arquivoRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={(e) => e.target.files?.[0] && importarPlanilha(e.target.files[0])}
+          />
+          <button
+            onClick={() => arquivoRef.current?.click()}
+            className="btn-secondary"
+            disabled={importando}
+            title="Importar planilha de acerto (mesmo modelo do Acerto_Jairo). Vendas já registradas são ignoradas."
+          >
+            {importando ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />}
+            Importar acerto
+          </button>
           <button onClick={carregar} className="btn-secondary" disabled={carregando} title="Atualizar números">
             {carregando ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             Atualizar
@@ -211,6 +405,117 @@ export function FunilVendas() {
       {erro && (
         <div className="card p-4 text-sm" style={{ color: '#EF4444' }}>
           {erro}
+        </div>
+      )}
+
+      {/* VENDAS REALIZADAS (fonte oficial: tabela de vendas) */}
+      {!carregando && vendas.length > 0 && (
+        <div className="card p-5 space-y-4">
+          <div className="flex flex-col md:flex-row md:items-baseline md:justify-between gap-1">
+            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+              Vendas realizadas
+            </h2>
+            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+              Planilhas de acerto + vendas registradas no chat {campanhaSel !== 'todas' && '(somente desta campanha)'}
+            </p>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div>
+              <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Vendas</p>
+              <p className="text-2xl font-semibold tabular-nums" style={{ color: '#3B82F6' }}>{resumoVendas.qtd.toLocaleString('pt-BR')}</p>
+            </div>
+            <div>
+              <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Faturamento</p>
+              <p className="text-2xl font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>{moeda(resumoVendas.total)}</p>
+            </div>
+            <div>
+              <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Ticket médio</p>
+              <p className="text-2xl font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>{moeda(resumoVendas.ticket)}</p>
+            </div>
+            <div>
+              <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Da base · fora da base</p>
+              <p className="text-sm font-medium tabular-nums mt-1" style={{ color: 'var(--text-primary)' }}>
+                {resumoVendas.daBase.qtd} ({moeda(resumoVendas.daBase.valor)})
+              </p>
+              <p className="text-sm tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                {resumoVendas.fora.qtd} ({moeda(resumoVendas.fora.valor)})
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Por mês</p>
+              {resumoVendas.porMes.map(([mes, d]) => {
+                const [a, m] = mes.split('-');
+                return (
+                  <div key={mes} className="flex justify-between text-xs py-1" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>{MESES[Number(m) - 1]}/{a}</span>
+                    <span className="tabular-nums" style={{ color: 'var(--text-primary)' }}>{d.qtd} vendas · {moeda(d.valor)}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div>
+              <p className="text-xs font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Por forma de pagamento</p>
+              {resumoVendas.formas.map((f) => (
+                <div key={f.nome} className="flex justify-between text-xs py-1" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>{f.nome}</span>
+                  <span className="tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                    {moeda(f.valor)} <span style={{ color: 'var(--text-muted)' }}>({pct(f.valor, resumoVendas.total)})</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <button
+            onClick={() => setMostrarLista(!mostrarLista)}
+            className="text-xs inline-flex items-center gap-1"
+            style={{ color: 'var(--accent-primary)' }}
+          >
+            {mostrarLista ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            {mostrarLista ? 'Esconder a lista de vendas' : `Ver as ${resumoVendas.qtd} vendas`}
+          </button>
+          {mostrarLista && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr style={{ color: 'var(--text-muted)' }}>
+                    <th className="text-left font-medium py-1.5">Data</th>
+                    <th className="text-left font-medium py-1.5">Formando</th>
+                    <th className="text-left font-medium py-1.5">Instituição / curso</th>
+                    <th className="text-left font-medium py-1.5">Pagamento</th>
+                    <th className="text-left font-medium py-1.5">Origem</th>
+                    <th className="text-right font-medium py-1.5">Valor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {vendasFiltradas.map((v) => (
+                    <tr key={v.id} style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                      <td className="py-1.5 tabular-nums" style={{ color: 'var(--text-secondary)' }}>{dataBR(v.data_venda)}</td>
+                      <td style={{ color: 'var(--text-primary)' }}>{v.formando}</td>
+                      <td style={{ color: 'var(--text-secondary)' }}>{[v.instituicao, v.curso].filter(Boolean).join(' · ')}</td>
+                      <td style={{ color: 'var(--text-secondary)' }}>{v.forma_pagamento || '-'}</td>
+                      <td>
+                        <span
+                          className="badge"
+                          style={{
+                            fontSize: '10px',
+                            backgroundColor: v.contato_campanha_id ? 'rgba(59,130,246,0.15)' : 'rgba(245,158,11,0.15)',
+                            color: v.contato_campanha_id ? '#3B82F6' : '#F59E0B',
+                          }}
+                        >
+                          {v.contato_campanha_id ? 'Base' : 'Fora da base'}
+                        </span>
+                      </td>
+                      <td className="text-right tabular-nums" style={{ color: 'var(--text-primary)' }}>{moeda(Number(v.valor_total))}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -278,9 +583,8 @@ export function FunilVendas() {
           </div>
 
           {/* Situacao atual */}
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {[
-              { rotulo: 'Faturamento dos vendidos', valor: moeda(extras.faturamento), cor: '#3B82F6' },
               { rotulo: 'Aguardando link de pagamento', valor: extras.aguardandoLink, cor: '#F59E0B' },
               { rotulo: 'Compra programada', valor: extras.compraFutura, cor: '#8B5CF6' },
               { rotulo: 'Com especialista', valor: extras.comEspecialista, cor: '#14B8A6' },
