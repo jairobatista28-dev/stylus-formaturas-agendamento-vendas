@@ -61,280 +61,355 @@ function getRandomAntiBlockDelay(): number {
 }
 
 // uazapiGO endpoint: POST /send/text (token header identifies the instance)
-async function enviarMensagem(telefone: string, mensagem: string, sb: any): Promise<boolean> {
+async function enviarMensagem(telefone: string, mensagem: string, sb: any): Promise<{ ok: boolean; erro?: string }> {
   try {
-    let uazapiUrl = Deno.env.get("UAZAPI_URL");
+    let uazapiUrl = Deno.env.get("UAZAPI_URL") || Deno.env.get("UAZAPI_BASE_URL");
     let uazapiToken = Deno.env.get("UAZAPI_TOKEN");
 
-    // Fall back to whatsapp_settings table if env vars not set
     if (!uazapiUrl || !uazapiToken) {
       const { data: settings } = await sb
         .from("whatsapp_settings")
         .select("api_url, api_token")
         .limit(1)
         .maybeSingle();
-
       if (settings) {
         uazapiUrl = uazapiUrl || settings.api_url;
         uazapiToken = uazapiToken || settings.api_token;
       }
     }
-
     if (!uazapiUrl || !uazapiToken) {
-      console.error("[Uazapi] Configuracao incompleta. URL:", !!uazapiUrl, "Token:", !!uazapiToken);
-      return false;
+      return { ok: false, erro: "uazapi_nao_configurada" };
     }
 
-    // Limpa o telefone
     let cleanPhone = telefone.replace(/\D/g, "");
-    if (!cleanPhone.startsWith("55")) {
-      cleanPhone = `55${cleanPhone}`;
-    }
+    if (!cleanPhone.startsWith("55")) cleanPhone = `55${cleanPhone}`;
 
-    const baseUrl = uazapiUrl.replace(/\/$/, "");
-    const endpoint = `${baseUrl}/send/text`;
-    const payload = { number: cleanPhone, text: mensagem };
-
-    console.log(`[Uazapi] Enviando para ${cleanPhone} | URL: ${endpoint} | Msg: ${mensagem.substring(0, 80)}...`);
-
-    const response = await fetch(endpoint, {
+    const response = await fetch(`${uazapiUrl.replace(/\/$/, "")}/send/text`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "token": uazapiToken,
-      },
-      body: JSON.stringify(payload),
+      headers: { "Content-Type": "application/json", "token": uazapiToken },
+      body: JSON.stringify({ number: cleanPhone, text: mensagem }),
     });
-
     const responseText = await response.text();
-
-    console.log(`[Uazapi] Resposta: status=${response.status} | body=${responseText.substring(0, 500)}`);
-
-    if (!response.ok) {
-      console.error(`[Uazapi] Erro ${response.status}: ${responseText}`);
-      return false;
-    }
-
-    console.log(`[Uazapi] Mensagem enviada com sucesso para ${cleanPhone}`);
-    return true;
+    console.log(`[Uazapi] ${cleanPhone}: status=${response.status} | ${responseText.substring(0, 300)}`);
+    if (!response.ok) return { ok: false, erro: `${response.status}: ${responseText.substring(0, 300)}` };
+    return { ok: true };
   } catch (err) {
-    console.error("[Uazapi] Excecao ao enviar:", err);
-    return false;
+    return { ok: false, erro: err instanceof Error ? err.message : "erro_rede" };
   }
 }
 
-serve(async (req: Request) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
-  }
+// ============================================================================
+// ENVIO SEGURO (config na tabela envio_config)
+// ============================================================================
 
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Metodo nao permitido" }), {
-      status: 405,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+interface EnvioConfig {
+  abertura_ativa: boolean;
+  abertura_venda: string;
+  abertura_agendamento: string;
+  incluir_sair: boolean;
+  texto_sair: string;
+  limite_inicial: number;
+  incremento_semanal: number;
+  limite_maximo: number;
+  aquecimento_inicio: string;
+  hora_inicio: number;
+  hora_fim: number;
+  dias_semana: number[];
+  fuso: string;
+  falhas_para_pausar: number;
+  falhas_seguidas: number;
+  pausado: boolean;
+}
+
+function partesNoFuso(fuso: string, d: Date = new Date()) {
+  const f = new Intl.DateTimeFormat("en-US", {
+    timeZone: fuso, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false, weekday: "short",
+  });
+  const p: Record<string, string> = {};
+  for (const x of f.formatToParts(d)) p[x.type] = x.value;
+  const dias: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    ano: Number(p.year), mes: Number(p.month), dia: Number(p.day),
+    hora: Number(p.hour) % 24, minuto: Number(p.minute), diaSemana: dias[p.weekday] ?? 0,
+  };
+}
+
+/** Inicio do dia de hoje (no fuso) em UTC */
+function inicioDoDiaUTC(fuso: string): string {
+  const agora = new Date();
+  const p = partesNoFuso(fuso, agora);
+  const localComoUTC = Date.UTC(p.ano, p.mes - 1, p.dia, p.hora, p.minuto);
+  const offsetMs = localComoUTC - Math.floor(agora.getTime() / 60000) * 60000;
+  return new Date(Date.UTC(p.ano, p.mes - 1, p.dia, 0, 0) - offsetMs).toISOString();
+}
+
+/** Limite de primeiros contatos hoje: comeca baixo e sobe por semana ate o maximo */
+function limiteDeHoje(cfg: EnvioConfig): number {
+  const inicio = new Date(`${cfg.aquecimento_inicio}T00:00:00Z`).getTime();
+  const semanas = Math.max(0, Math.floor((Date.now() - inicio) / (7 * 86400000)));
+  return Math.min(cfg.limite_maximo, cfg.limite_inicial + semanas * cfg.incremento_semanal);
+}
+
+function dentroDaJanela(cfg: EnvioConfig): boolean {
+  const p = partesNoFuso(cfg.fuso);
+  return (cfg.dias_semana || []).includes(p.diaSemana) && p.hora >= cfg.hora_inicio && p.hora < cfg.hora_fim;
+}
+
+function primeiroNome(nome?: string | null): string {
+  const p = String(nome || "").trim().split(/\s+/)[0] || "";
+  return p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : "";
+}
+
+function capitalizar(t?: string | null): string {
+  return String(t || "").trim().toLowerCase().replace(/(^|\s)\S/g, (m) => m.toUpperCase());
+}
+
+function montarAbertura(cfg: EnvioConfig, tipo: string, nome: string, curso?: string | null): string {
+  const modelo = tipo === "venda_material" ? cfg.abertura_venda : cfg.abertura_agendamento;
+  const cursoTxt = curso && !/^outros?$/i.test(curso.trim()) ? ` de ${capitalizar(curso)}` : "";
+  let texto = String(modelo || "")
+    .replace(/\{primeiro_nome\}/gi, primeiroNome(nome))
+    .replace(/\{nome\}/gi, nome || "")
+    .replace(/\{curso\}/gi, cursoTxt)
+    .trim();
+  if (cfg.incluir_sair && cfg.texto_sair) texto += `\n\n${cfg.texto_sair}`;
+  return texto;
+}
+
+/** Erros que indicam numero invalido (nao e sinal de bloqueio) */
+function erroDeNumeroInvalido(erro?: string): boolean {
+  return /not.{0,20}whatsapp|not.{0,10}exist|no.{0,10}account|not.{0,10}registered|invalid.{0,10}(number|phone|jid)|n[aã]o.{0,20}(existe|whatsapp)/i.test(erro || "");
+}
+
+async function registrarAlerta(sb: any, a: { tipo: string; gravidade: string; titulo: string; detalhe?: string }) {
+  try {
+    await sb.from("alertas_sistema").insert({ tipo: a.tipo, gravidade: a.gravidade, titulo: a.titulo, detalhe: a.detalhe || null });
+  } catch (e) {
+    console.warn("[Alerta] Falha ao registrar:", e);
+  }
+}
+
+/** Conta a falha; ao atingir o limite, pausa os disparos e avisa no Painel de Alertas */
+async function contarFalha(sb: any, cfg: EnvioConfig | null, erro?: string) {
+  if (!cfg) return;
+  const falhas = (cfg.falhas_seguidas || 0) + 1;
+  if (falhas >= (cfg.falhas_para_pausar || 3)) {
+    await sb.from("envio_config").update({
+      falhas_seguidas: falhas,
+      pausado: true,
+      pausado_motivo: `${falhas} envios seguidos falharam. Último erro: ${String(erro || "").slice(0, 200)}`,
+      pausado_em: new Date().toISOString(),
+    }).eq("id", 1);
+    await registrarAlerta(sb, {
+      tipo: "envios_pausados",
+      gravidade: "erro",
+      titulo: "Disparos das campanhas PAUSADOS automaticamente",
+      detalhe: `${falhas} envios seguidos falharam (possível bloqueio ou WhatsApp desconectado). Confira a conexão do WhatsApp e retome em Campanhas > Envio seguro. Último erro: ${String(erro || "").slice(0, 300)}`,
     });
+    console.error(`[Dispatcher] PAUSADO apos ${falhas} falhas seguidas`);
+  } else {
+    await sb.from("envio_config").update({ falhas_seguidas: falhas }).eq("id", 1);
   }
+}
 
-  const sb = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+async function zerarFalhas(sb: any, cfg: EnvioConfig | null) {
+  if (cfg && cfg.falhas_seguidas > 0) await sb.from("envio_config").update({ falhas_seguidas: 0 }).eq("id", 1);
+}
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+}
+
+async function obterContactId(sb: any, telefone: string, nome?: string | null): Promise<string | undefined> {
+  const tel = normalizePhone(telefone);
+  const { data: existente } = await sb.from("contacts").select("id").eq("phone", tel).maybeSingle();
+  if (existente) return existente.id;
+  const { data: novo } = await sb
+    .from("contacts")
+    .insert({ phone: tel, name: nome || tel, status: "lead", assigned_to: "ia" })
+    .select("id")
+    .single();
+  return novo?.id;
+}
+
+async function somarEnviada(sb: any, campanhaId: string) {
+  const { data: c } = await sb.from("campanhas").select("total_sent").eq("id", campanhaId).single();
+  if (c) await sb.from("campanhas").update({ total_sent: (c.total_sent || 0) + 1 }).eq("id", campanhaId);
+}
+
+serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
+  if (req.method !== "POST") return json({ error: "Metodo nao permitido" }, 405);
+
+  const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
   try {
-    // ATOMIC LOCK: claim all pending blocks for one contact in a single transaction
-    // This prevents concurrent dispatchers (cron + manual) from grabbing the same contact
-    const { data: blocosDoContato, error: claimError } = await sb
-      .rpc("claim_contact_blocks", { p_limit: 20 });
+    const { data: cfgBruta } = await sb.from("envio_config").select("*").eq("id", 1).maybeSingle();
+    const cfg = (cfgBruta || null) as EnvioConfig | null;
 
+    if (cfg?.pausado) {
+      return json({ pausado: true, message: "Disparos pausados (Campanhas > Envio seguro)" });
+    }
+
+    const { data: blocos, error: claimError } = await sb.rpc("claim_contact_blocks", { p_limit: 20 });
     if (claimError) {
       console.error("[Dispatcher] Erro ao claim blocos:", claimError);
-      return new Response(JSON.stringify({ error: claimError.message }), {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return json({ error: claimError.message }, 500);
     }
+    if (!blocos || blocos.length === 0) return json({ message: "Nenhum item na fila" });
 
-    if (!blocosDoContato || blocosDoContato.length === 0) {
-      return new Response(JSON.stringify({ message: "Nenhum item na fila" }), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    blocos.sort((a: any, b: any) => a.ordem_bloco - b.ordem_bloco);
+    const contatoId = blocos[0].contato_id;
+    const ids = blocos.map((b: any) => b.id);
+    const devolver = async () => {
+      await sb.from("fila_envios").update({ status: "pendente" }).in("id", ids);
+    };
+    const cancelar = async () => {
+      await sb.from("fila_envios").update({ status: "cancelado" }).in("id", ids);
+    };
 
-    const primeiroContatoId = blocosDoContato[0].contato_id;
-
-    console.log(`[Dispatcher] Reivindicados ${blocosDoContato.length} blocos para contato ${primeiroContatoId}`);
-
-    // Verifica status do contato
     const { data: contato } = await sb
       .from("contatos_campanha")
-      .select("id, nome, status")
-      .eq("id", primeiroContatoId)
+      .select("id, nome, status, curso, abertura_status, primeiro_envio_em, campanhas(tipo_atendimento)")
+      .eq("id", contatoId)
       .single();
+    const telefone = blocos[0].telefone;
+    const telNorm = normalizePhone(telefone);
+    const tipo = (contato as any)?.campanhas?.tipo_atendimento || "visita_externa";
+    const continuacao = contato?.abertura_status === "liberada";
+    const temBloco1 = blocos.some((b: any) => b.ordem_bloco === 1);
+    const primeiroContato = !continuacao && temBloco1 && !contato?.primeiro_envio_em;
 
-    let contactId: string | undefined;
+    // Contato que ja saiu da etapa inicial (respondeu, comprou...) nao recebe a abertura de novo
+    if (!continuacao && temBloco1 && contato && !["aguardando_inicio", "enviando"].includes(contato.status)) {
+      await cancelar();
+      return json({ cancelado: true, motivo: `status_${contato.status}` });
+    }
 
-    // Processa cada bloco em sequencia (for-of com await)
-    for (const job of blocosDoContato) {
-      console.log(`[Dispatcher] Processando bloco ${job.ordem_bloco} para ${job.telefone}`);
+    if (primeiroContato) {
+      // Pediu para nao receber (SAIR)
+      const { data: saiu } = await sb.from("optout").select("telefone").eq("telefone", telNorm).maybeSingle();
+      if (saiu) {
+        await cancelar();
+        await sb.from("contatos_campanha").update({ status: "sem_interesse" }).eq("id", contatoId);
+        return json({ cancelado: true, motivo: "optout" });
+      }
+      if (cfg) {
+        if (!dentroDaJanela(cfg)) {
+          await devolver();
+          return json({ aguardando: true, motivo: "fora_do_horario" });
+        }
+        const { count } = await sb
+          .from("contatos_campanha")
+          .select("id", { count: "exact", head: true })
+          .gte("primeiro_envio_em", inicioDoDiaUTC(cfg.fuso));
+        const limite = limiteDeHoje(cfg);
+        if ((count || 0) >= limite) {
+          await devolver();
+          return json({ aguardando: true, motivo: "limite_diario", enviados_hoje: count, limite });
+        }
+      }
+    }
 
-      // Verifica se contato ainda e valido para bloco 1
-      if (job.ordem_bloco === 1 && contato && contato.status !== "aguardando_inicio" && contato.status !== "enviando") {
-        await sb.from("fila_envios").update({ status: "cancelado" }).eq("id", job.id);
-        continue;
+    // ---------- ABERTURA EM DOIS PASSOS ----------
+    if (primeiroContato && cfg?.abertura_ativa) {
+      const texto = montarAbertura(cfg, tipo, contato?.nome || "", contato?.curso);
+      await sleep(getRandomAntiBlockDelay());
+      await sleep(Math.floor(Math.random() * 2000) + 2000);
+      const r = await enviarMensagem(telefone, texto, sb);
+
+      if (!r.ok) {
+        await sb.from("fila_envios").update({ status: "cancelado" }).in("id", ids);
+        await sb.from("contatos_campanha").update({ status: "erro_envio" }).eq("id", contatoId);
+        if (!erroDeNumeroInvalido(r.erro)) await contarFalha(sb, cfg, r.erro);
+        return json({ success: false, erro: r.erro });
       }
 
-      // Sistema anti-bloqueio inteligente:
-      // - Bloco 1 (primeiro contato): intervalo variado de 5s a 2min antes de enviar
-      // - Blocos 2+: usa o delay_bloco especifico do marcador [esperar Xs]
-      if (job.ordem_bloco === 1) {
-        const antiBlockDelay = getRandomAntiBlockDelay();
-        console.log(`[Anti-Bloqueio] Aguardando ${(antiBlockDelay / 1000).toFixed(1)}s antes do envio`);
-        await sleep(antiBlockDelay);
+      await zerarFalhas(sb, cfg);
+      const agora = new Date().toISOString();
+      // O resto da campanha fica guardado ate o formando responder
+      await sb.from("fila_envios").update({ status: "aguardando_resposta" }).in("id", ids);
+      await sb.from("contatos_campanha").update({
+        status: "saudacao_enviada",
+        abertura_status: "enviada",
+        abertura_enviada_em: agora,
+        primeiro_envio_em: agora,
+      }).eq("id", contatoId);
+      const contactId = await obterContactId(sb, telefone, contato?.nome);
+      if (contactId) {
+        await sb.from("messages").insert({ contact_id: contactId, direction: "out", content: texto, sent_by: "ia", delivered: true, seq: 0 });
+      }
+      await somarEnviada(sb, blocos[0].campanha_id);
+      console.log(`[Dispatcher] Abertura enviada para ${contato?.nome} - aguardando resposta`);
+      return json({ success: true, abertura: true, contato_id: contatoId });
+    }
+
+    // ---------- ENVIO DOS BLOCOS (direto ou liberado pela resposta) ----------
+    let contactId: string | undefined;
+    let enviados = 0;
+    for (const job of blocos) {
+      if (enviados === 0) {
+        // Continuacao e resposta a uma mensagem do formando: espera curta, como uma pessoa
+        await sleep(continuacao ? 3000 + Math.random() * 3000 : getRandomAntiBlockDelay());
       } else if (job.delay_bloco > 0) {
-        console.log(`[Delay] Aguardando ${job.delay_bloco}s entre blocos`);
         await sleep(job.delay_bloco * 1000);
       } else {
-        // Sem delay_bloco definido: usa intervalo anti-bloqueio variado
-        const fallbackDelay = getRandomAntiBlockDelay();
-        console.log(`[Anti-Bloqueio] Aguardando ${(fallbackDelay / 1000).toFixed(1)}s (fallback)`);
-        await sleep(fallbackDelay);
+        await sleep(continuacao ? 4000 + Math.random() * 4000 : getRandomAntiBlockDelay());
+      }
+      await sleep(Math.floor(Math.random() * 2000) + 2000);
+
+      let texto = job.mensagem;
+      if (primeiroContato && job.ordem_bloco === 1 && cfg?.incluir_sair && cfg.texto_sair && !cfg.abertura_ativa) {
+        texto += `\n\n${cfg.texto_sair}`;
       }
 
-      // Simulacao de digitacao
-      const typingDelay = Math.floor(Math.random() * 2000) + 2000;
-      await sleep(typingDelay);
-
-      // Envia mensagem
-      const enviado = await enviarMensagem(job.telefone, job.mensagem, sb);
-
-      if (enviado) {
-        await sb.from("fila_envios").update({ status: "enviado" }).eq("id", job.id);
-
-        // Salva na tabela messages
-        const telefoneNormalizado = normalizePhone(job.telefone);
-
-        if (!contactId) {
-          const { data: existingContact } = await sb
-            .from("contacts")
-            .select("id")
-            .eq("phone", telefoneNormalizado)
-            .maybeSingle();
-
-          if (existingContact) {
-            contactId = existingContact.id;
-          } else {
-            const { data: newContact } = await sb
-              .from("contacts")
-              .insert({
-                phone: telefoneNormalizado,
-                name: contato?.nome || telefoneNormalizado,
-                status: "lead",
-                assigned_to: "ia",
-              })
-              .select("id")
-              .single();
-            contactId = newContact?.id;
-          }
-        }
-
-        if (contactId) {
-          await sb.from("messages").insert({
-            contact_id: contactId,
-            direction: "out",
-            content: job.mensagem,
-            sent_by: "ia",
-            delivered: true,
-            seq: job.ordem_bloco,
-          });
-        }
-
-        // Atualiza status para saudacao_enviada DEPOIS do primeiro bloco
-        if (job.ordem_bloco === 1) {
-          await sb
-            .from("contatos_campanha")
-            .update({ status: "saudacao_enviada" })
-            .eq("id", job.contato_id);
-          console.log(`[Dispatcher] Saudacao enviada para ${job.telefone}`);
-        }
-
-        // Incrementa contador da campanha
-        const { data: campanhaAtual } = await sb
-          .from("campanhas")
-          .select("total_sent")
-          .eq("id", job.campanha_id)
-          .single();
-
-        if (campanhaAtual) {
-          await sb
-            .from("campanhas")
-            .update({ total_sent: (campanhaAtual.total_sent || 0) + 1 })
-            .eq("id", job.campanha_id);
-        }
-      } else {
+      const r = await enviarMensagem(job.telefone, texto, sb);
+      if (!r.ok) {
         await sb.from("fila_envios").update({ status: "erro" }).eq("id", job.id);
-        console.error(`[Dispatcher] Erro ao enviar bloco ${job.ordem_bloco} para contato ${job.contato_id}`);
-
-        // Cancela todos os outros blocos pendentes deste contato
-        await sb
-          .from("fila_envios")
-          .update({ status: "cancelado" })
-          .eq("contato_id", job.contato_id)
-          .eq("status", "processando");
-
-        // Marca o contato como erro_envio
-        await sb
-          .from("contatos_campanha")
-          .update({ status: "erro_envio" })
-          .eq("id", job.contato_id);
-
-        console.log(`[Dispatcher] Contato ${job.contato_id} marcado como erro_envio - pulando para proximo contato`);
-
+        await sb.from("fila_envios").update({ status: "cancelado" }).eq("contato_id", job.contato_id).eq("status", "processando");
+        await sb.from("contatos_campanha").update({ status: "erro_envio" }).eq("id", job.contato_id);
+        if (!erroDeNumeroInvalido(r.erro)) await contarFalha(sb, cfg, r.erro);
+        console.log(`[Dispatcher] Contato ${job.contato_id} marcado como erro_envio`);
         break;
       }
+
+      await zerarFalhas(sb, cfg);
+      enviados++;
+      await sb.from("fila_envios").update({ status: "enviado" }).eq("id", job.id);
+      if (!contactId) contactId = await obterContactId(sb, job.telefone, contato?.nome);
+      if (contactId) {
+        await sb.from("messages").insert({
+          contact_id: contactId, direction: "out", content: texto, sent_by: "ia", delivered: true, seq: job.ordem_bloco,
+        });
+      }
+      if (job.ordem_bloco === 1 && !continuacao) {
+        await sb.from("contatos_campanha").update({
+          status: "saudacao_enviada",
+          primeiro_envio_em: contato?.primeiro_envio_em || new Date().toISOString(),
+        }).eq("id", job.contato_id);
+      }
+      if (!continuacao) await somarEnviada(sb, job.campanha_id);
     }
 
-    // Verifica se ainda ha blocos pendentes para este contato
-    const { data: blocosRestantes } = await sb
+    // Terminou de enviar tudo desse contato
+    const { data: restantes } = await sb
       .from("fila_envios")
       .select("id")
-      .eq("contato_id", primeiroContatoId)
-      .eq("status", "pendente")
+      .eq("contato_id", contatoId)
+      .in("status", ["pendente", "aguardando_resposta"])
       .limit(1);
-
-    if (!blocosRestantes || blocosRestantes.length === 0) {
-      const { data: contatoFinal } = await sb
-        .from("contatos_campanha")
-        .select("status")
-        .eq("id", primeiroContatoId)
-        .single();
-
-      if (contatoFinal?.status === "enviando") {
-        await sb
-          .from("contatos_campanha")
-          .update({ status: "saudacao_enviada" })
-          .eq("id", primeiroContatoId);
+    if (!restantes || restantes.length === 0) {
+      if (continuacao) {
+        await sb.from("contatos_campanha").update({ abertura_status: "concluida" }).eq("id", contatoId);
+      } else if (contato?.status === "enviando") {
+        await sb.from("contatos_campanha").update({ status: "saudacao_enviada" }).eq("id", contatoId);
       }
-
-      console.log(`[Dispatcher] Todos os blocos enviados - contato aguardando resposta`);
     }
 
-    return new Response(JSON.stringify({
-      success: true,
-      processados: blocosDoContato.length,
-      contato_id: primeiroContatoId,
-    }), {
-      status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-
+    return json({ success: true, processados: enviados, contato_id: contatoId, continuacao });
   } catch (error) {
     console.error("[Dispatcher] Erro geral:", error);
-    return new Response(JSON.stringify({
-      error: error instanceof Error ? error.message : "Erro desconhecido",
-    }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return json({ error: error instanceof Error ? error.message : "Erro desconhecido" }, 500);
   }
 });

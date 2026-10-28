@@ -33,6 +33,7 @@ import {
 import { supabase } from '../lib/supabase';
 import * as XLSX from 'xlsx';
 import { CampaignReportModal } from '../components/CampaignReportModal';
+import { EnvioSeguroPanel } from '../components/EnvioSeguroPanel';
 
 const TURNOS_HORARIOS: Record<string, string> = {
   'Manha (8h as 12h)': 'Manha entre 08:00 e 12:00',
@@ -741,6 +742,8 @@ export function Campaigns() {
           Nova Campanha
         </button>
       </div>
+
+      <EnvioSeguroPanel onToast={showToast} />
 
       {isLoading ? (
         <div className="flex items-center justify-center py-12">

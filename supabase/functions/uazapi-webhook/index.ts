@@ -480,6 +480,73 @@ async function transcreverAudio(url: string, mimeHint?: string | null): Promise<
   }
 }
 
+// ============================================================================
+// ENVIO SEGURO: pedido de SAIR e abertura em dois passos
+// ============================================================================
+
+function normalizarSimples(t: string): string {
+  return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** "SAIR", "parar", "stop", "nao quero mais receber"... (mensagem curta) */
+function ehPedidoSair(texto: string): boolean {
+  const t = normalizarSimples(texto.replace(/^🎤\s*/, ''));
+  if (!t || t.length > 60) return false;
+  if (/^(sair|parar|pare|stop|cancelar|descadastrar|remover|remova|unsubscribe)( (por favor|pf|pfv|obrigad[oa]))?$/.test(t)) return true;
+  return /^(nao quero (mais )?receber( (mais )?(mensage(m|ns)|isso|nada))?|para de (me )?mandar( mensage(m|ns))?|nao me mande mais( mensage(m|ns))?|me tira (dessa|da) lista|me remove (dessa|da) lista)$/.test(t);
+}
+
+/** Resposta tipica de numero errado na abertura */
+function ehNumeroErrado(texto: string): boolean {
+  const t = normalizarSimples(texto);
+  return /\b(numero errado|nao sou (eu|ela|ele)|nao e (meu|minha|esse)|nao conheco|engano|nao e (comigo|aqui)|voce errou|pessoa errada)\b/.test(t);
+}
+
+/** Registra o pedido de SAIR: para todos os disparos para esse numero */
+async function processarOptout(sb: any, telefone: string, texto: string, motivo: 'sair' | 'numero_errado') {
+  const { data: cfg } = await sb.from('envio_config').select('resposta_sair').eq('id', 1).maybeSingle();
+  const { data: ccs } = await sb.from('contatos_campanha').select('id, nome, status').eq('telefone', telefone);
+  const nome = ccs?.[0]?.nome || null;
+  const idsCc = (ccs || []).map((c: any) => c.id);
+
+  await sb.from('optout').upsert({ telefone, nome, mensagem: texto.slice(0, 300) }, { onConflict: 'telefone' });
+  if (idsCc.length) {
+    await sb.from('contatos_campanha').update({ status: 'sem_interesse' }).in('id', idsCc).neq('status', 'comprou');
+    await sb.from('fila_envios').update({ status: 'cancelado' }).in('contato_id', idsCc).in('status', ['pendente', 'aguardando_resposta']);
+    await sb.from('resgate_envios').update({ status: 'cancelado', motivo: 'optout' }).in('contato_campanha_id', idsCc).eq('status', 'agendado');
+    await sb.from('retornos_agendados').update({ status: 'cancelado', motivo: 'optout' }).in('contato_campanha_id', idsCc).eq('status', 'agendado');
+  }
+  await sb.from('conversa_estado').update({ aguardando_resposta: false, status: 'concluido' }).eq('contato_telefone', telefone);
+
+  // Contato fica em atendimento manual (a IA nao puxa mais venda)
+  let { data: contato } = await sb.from('contacts').select('id').eq('phone', telefone).maybeSingle();
+  if (!contato) {
+    const { data: novo } = await sb.from('contacts').insert({ phone: telefone, name: nome || telefone, status: 'lead', assigned_to: 'manual' }).select('id').single();
+    contato = novo;
+  }
+  const resposta = motivo === 'numero_errado'
+    ? 'Desculpe o incômodo! Vou retirar seu número da nossa lista. Tenha um ótimo dia 😊'
+    : (cfg?.resposta_sair || 'Tudo bem! Você não vai mais receber nossas mensagens sobre isso. Se precisar de algo, é só chamar por aqui 😊');
+  if (contato?.id) {
+    await sb.from('contacts').update({ assigned_to: 'manual' }).eq('id', contato.id);
+    await sb.from('messages').insert([
+      { contact_id: contato.id, direction: 'in', content: texto, sent_by: 'contato' },
+      { contact_id: contato.id, direction: 'out', content: resposta, sent_by: 'ia' },
+    ]);
+  }
+  await enviarMensagemUazapi(telefone, resposta);
+  await registrarAlerta(sb, {
+    tipo: 'optout',
+    gravidade: 'info',
+    titulo: motivo === 'numero_errado' ? 'Número errado: retirado das listas' : 'Pediu para sair das listas',
+    detalhe: `Mensagem: "${texto.slice(0, 200)}". Não recebe mais disparos de campanhas.`,
+    contato_nome: nome,
+    telefone,
+  });
+  console.log(`[EnvioSeguro] ${telefone} saiu das listas (${motivo})`);
+}
+
 // Tipos de mensagem da uazapi que representam midia (nao texto puro)
 const TIPOS_MIDIA = ['image', 'video', 'document', 'audio', 'ptt', 'sticker'];
 
@@ -1337,6 +1404,80 @@ serve(async (req) => {
           telefone: telefoneNormalizado,
         });
       }
+    }
+
+    // ===================== ENVIO SEGURO =====================
+    // 1) Pedido de SAIR: vale para qualquer contato, inclusive em atendimento manual
+    if (!ehMidia || /^🎤/.test(textoRecebido)) {
+      if (ehPedidoSair(textoRecebido)) {
+        await processarOptout(sb, telefoneNormalizado, textoRecebido, 'sair');
+        return new Response(JSON.stringify({ success: true, optout: true }), {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // 2) Resposta a abertura em dois passos: libera a mensagem completa da campanha
+    const { data: aberturasPendentes } = await sb
+      .from('contatos_campanha')
+      .select('id, nome')
+      .eq('telefone', telefoneNormalizado)
+      .eq('abertura_status', 'enviada');
+    if (aberturasPendentes && aberturasPendentes.length > 0) {
+      if (ehNumeroErrado(textoRecebido)) {
+        await processarOptout(sb, telefoneNormalizado, textoRecebido, 'numero_errado');
+        return new Response(JSON.stringify({ success: true, numero_errado: true }), {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const idsAbertura = aberturasPendentes.map((c: any) => c.id);
+      await sb
+        .from('contatos_campanha')
+        .update({ abertura_status: 'liberada', interagiu_em: new Date().toISOString() })
+        .in('id', idsAbertura);
+      await sb
+        .from('fila_envios')
+        .update({ status: 'pendente', prioridade: 1 })
+        .in('contato_id', idsAbertura)
+        .eq('status', 'aguardando_resposta');
+
+      // Registra a resposta no chat (a mensagem completa da campanha sai em seguida, pela fila)
+      let { data: contatoAb } = await sb.from('contacts').select('id, unread_count').eq('phone', telefoneNormalizado).maybeSingle();
+      if (!contatoAb) {
+        const { data: novo } = await sb
+          .from('contacts')
+          .insert({ phone: telefoneNormalizado, name: aberturasPendentes[0].nome || telefoneNormalizado, status: 'lead', assigned_to: 'ia' })
+          .select('id, unread_count')
+          .single();
+        contatoAb = novo;
+      }
+      if (contatoAb?.id) {
+        await sb.from('messages').insert({
+          contact_id: contatoAb.id,
+          direction: 'in',
+          content: textoRecebido,
+          sent_by: 'contato',
+          message_type: ehMidia ? tipoMensagem : 'text',
+          media_url: mediaUrlRecebida,
+        });
+        await sb.from('contacts').update({ unread_count: (contatoAb.unread_count || 0) + 1 }).eq('id', contatoAb.id);
+      }
+
+      // Aciona a fila na hora (sem esperar o proximo minuto do agendador)
+      fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/campaign-dispatcher`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}` },
+        body: '{}',
+      }).catch(() => null);
+
+      console.log(`[EnvioSeguro] ${telefoneNormalizado} respondeu a abertura - mensagem completa liberada`);
+      return new Response(JSON.stringify({ success: true, abertura_liberada: true }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
     // VERIFICACAO DE MODO MANUAL: se o contato esta em modo manual, salva a mensagem mas nao chama a IA

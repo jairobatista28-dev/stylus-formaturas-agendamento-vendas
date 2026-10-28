@@ -14,6 +14,8 @@ import {
   Bot,
   Receipt,
   UserPlus,
+  UserX,
+  PauseCircle,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
@@ -36,7 +38,9 @@ interface Alerta {
 }
 
 const TIPOS: Record<string, { rotulo: string; icone: typeof AlertTriangle }> = {
+  envios_pausados: { rotulo: 'Disparos pausados', icone: PauseCircle },
   atendimento_humano: { rotulo: 'Novos atendimentos', icone: UserPlus },
+  optout: { rotulo: 'Pediram para sair', icone: UserX },
   venda_pronta: { rotulo: 'Vendas prontas', icone: CreditCard },
   comprovante: { rotulo: 'Comprovantes', icone: Receipt },
   foto_falhou: { rotulo: 'Fotos não enviadas', icone: ImageOff },
