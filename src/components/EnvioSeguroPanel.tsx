@@ -59,14 +59,19 @@ export function EnvioSeguroPanel({ onToast }: { onToast: (msg: string, tipo: 'su
   const [aguardandoResposta, setAguardandoResposta] = useState<number | null>(null);
   const [optouts, setOptouts] = useState<number | null>(null);
 
-  async function carregar() {
+  async function carregar(soStatus = false) {
     const { data, error } = await supabase.from('envio_config').select('*').eq('id', 1).maybeSingle();
     if (error || !data) {
       setErro('Rode a migration 20261103120000_envio_seguro no banco para ativar o envio seguro.');
       return;
     }
     setErro(null);
-    setCfg(data as EnvioConfig);
+    // Na atualizacao automatica so o status muda: o que voce esta editando nao e apagado
+    setCfg((atual) =>
+      soStatus && atual
+        ? { ...atual, pausado: data.pausado, pausado_motivo: data.pausado_motivo, pausado_em: data.pausado_em, falhas_seguidas: data.falhas_seguidas }
+        : (data as EnvioConfig)
+    );
     const [hoje, aguardando, saiu] = await Promise.all([
       supabase.from('contatos_campanha').select('id', { count: 'exact', head: true }).gte('primeiro_envio_em', inicioDoDiaUTC(data.fuso)),
       supabase.from('contatos_campanha').select('id', { count: 'exact', head: true }).eq('abertura_status', 'enviada'),
@@ -79,7 +84,7 @@ export function EnvioSeguroPanel({ onToast }: { onToast: (msg: string, tipo: 'su
 
   useEffect(() => {
     carregar();
-    const t = setInterval(() => !document.hidden && carregar(), 60000);
+    const t = setInterval(() => !document.hidden && carregar(true), 60000);
     return () => clearInterval(t);
   }, []);
 
