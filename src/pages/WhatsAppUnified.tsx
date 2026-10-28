@@ -1327,6 +1327,9 @@ const formatTime = (dateStr: string) => {
                           <CheckCircle2 size={11} />
                           <span>
                             Vendido
+                            {!selectedContact.vendaRegistrada && (
+                              <span style={{ color: '#F59E0B' }}> · valor não registrado</span>
+                            )}
                             {selectedContact.vendaRegistrada ? (
                               <>
                                 {' · '}{formatCurrency(selectedContact.vendaRegistrada.valor)}
@@ -1376,6 +1379,18 @@ const formatTime = (dateStr: string) => {
                         Vendido
                       </button>
                     ) : (
+                      <>
+                      {!selectedContact.vendaRegistrada && (
+                        <button
+                          onClick={handleMarkAsSold}
+                          className="btn-secondary"
+                          style={{ padding: '6px 10px', fontSize: '11px', backgroundColor: '#F59E0B', color: 'white' }}
+                          title="Este contato está como vendido, mas sem o valor da venda. Registre para somar no Funil."
+                        >
+                          <CheckCircle2 size={12} />
+                          Registrar valor
+                        </button>
+                      )}
                       <button
                         onClick={handleDesfazerVenda}
                         className="btn-secondary"
@@ -1385,6 +1400,7 @@ const formatTime = (dateStr: string) => {
                         <X size={12} />
                         Desfazer VD
                       </button>
+                      </>
                     )}
                     <button
                       onClick={handleOpenNota}

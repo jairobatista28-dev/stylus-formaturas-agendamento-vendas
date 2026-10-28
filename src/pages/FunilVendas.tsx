@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, FileSpreadsheet, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileSpreadsheet, Loader2, RefreshCw } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../hooks/useToast';
 import { ToastContainer } from '../components/Toast';
@@ -13,6 +14,8 @@ import { ToastContainer } from '../components/Toast';
 
 interface Linha {
   id: string;
+  nome: string | null;
+  telefone: string | null;
   campanha_id: string;
   status: string | null;
   interagiu_em: string | null;
@@ -45,6 +48,18 @@ interface Venda {
 }
 
 const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+
+/** Primeiro + ultimo nome, sem acento (para saber se a pessoa ja tem venda registrada) */
+function chaveNome(n?: string | null): string {
+  const t = String(n || '')
+    .toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/-\s*\d+\s*$/, '')
+    .replace(/[^A-Z\s]/g, ' ')
+    .split(/\s+/)
+    .filter((x) => x && !['DE', 'DA', 'DO', 'DAS', 'DOS', 'E'].includes(x));
+  return t.length ? `${t[0]} ${t[t.length - 1]}` : '';
+}
 
 function dataBR(iso: string): string {
   const [a, m, d] = String(iso || '').split('-');
@@ -149,6 +164,7 @@ export function FunilVendas() {
   const [importando, setImportando] = useState(false);
   const arquivoRef = useRef<HTMLInputElement>(null);
   const { toasts, showToast, removeToast } = useToast();
+  const navigate = useNavigate();
 
   async function carregar() {
     setCarregando(true);
@@ -172,7 +188,7 @@ export function FunilVendas() {
     for (let inicio = 0; inicio < 100000; inicio += PAGINA) {
       const { data, error } = await supabase
         .from('contatos_campanha')
-        .select('id, campanha_id, status, interagiu_em, plano_escolhido, dados_confirmados_em, foto_enviada_em, resgate_enviado_em, resgate_variante, valor_oferecido, campanhas!inner(tipo_atendimento)')
+        .select('id, nome, telefone, campanha_id, status, interagiu_em, plano_escolhido, dados_confirmados_em, foto_enviada_em, resgate_enviado_em, resgate_variante, valor_oferecido, campanhas!inner(tipo_atendimento)')
         .eq('campanhas.tipo_atendimento', 'venda_material')
         .order('id')
         .range(inicio, inicio + PAGINA - 1);
@@ -254,6 +270,20 @@ export function FunilVendas() {
     () => (campanhaSel === 'todas' ? vendas : vendas.filter((v) => v.contato_campanha_id && campanhaDoContato.get(v.contato_campanha_id) === campanhaSel)),
     [vendas, campanhaSel, campanhaDoContato]
   );
+
+  // Marcados como vendido (status "comprou") mas sem a venda registrada com valor:
+  // nao entram no faturamento ate o valor ser registrado no chat
+  const vendidosSemValor = useMemo(() => {
+    const comVenda = new Set(vendas.map((v) => chaveNome(v.formando)));
+    const vistos = new Set<string>();
+    return base.filter((l) => {
+      if (l.status !== 'comprou' || idsComVenda.has(l.id)) return false;
+      const k = chaveNome(l.nome);
+      if (!k || comVenda.has(k) || vistos.has(k)) return false;
+      vistos.add(k);
+      return true;
+    });
+  }, [base, vendas, idsComVenda]);
 
   const resumoVendas = useMemo(() => {
     const total = vendasFiltradas.reduce((s, v) => s + Number(v.valor_total || 0), 0);
@@ -468,6 +498,31 @@ export function FunilVendas() {
               ))}
             </div>
           </div>
+
+          {vendidosSemValor.length > 0 && (
+            <div className="rounded-lg p-3" style={{ backgroundColor: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.35)' }}>
+              <p className="text-xs font-medium flex items-center gap-1.5" style={{ color: '#F59E0B' }}>
+                <AlertTriangle size={14} />
+                {vendidosSemValor.length} {vendidosSemValor.length === 1 ? 'formando marcado' : 'formandos marcados'} como vendido sem o valor registrado (fora do faturamento)
+              </p>
+              <div className="flex flex-wrap gap-2 mt-2">
+                {vendidosSemValor.map((l) => (
+                  <button
+                    key={l.id}
+                    onClick={() => navigate(`/whatsapp?tel=${encodeURIComponent(l.telefone || '')}`)}
+                    className="btn-secondary"
+                    style={{ padding: '4px 10px', fontSize: '11px' }}
+                    title="Abrir a conversa e clicar em Registrar valor"
+                  >
+                    {l.nome}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] mt-2" style={{ color: 'var(--text-muted)' }}>
+                Clique no nome, e no chat use o botão Registrar valor.
+              </p>
+            </div>
+          )}
 
           <button
             onClick={() => setMostrarLista(!mostrarLista)}
