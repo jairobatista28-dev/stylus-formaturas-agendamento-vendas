@@ -542,6 +542,101 @@ async function notificarInteresseDeCompraLegado(
 /**
  * Fluxo padrao de IA (sem campanha ativa)
  */
+// ============================================================================
+// ATENDIMENTO GERAL - contato que NAO esta em nenhuma campanha
+// A IA cumprimenta e descobre o que a pessoa quer. Ela NUNCA confirma que existem
+// fotos, valores ou prazos para quem nao esta na base: pede os dados do formando
+// (nome completo, CPF, curso, faculdade e data da formatura) e repassa para um
+// atendente humano consultar, com retorno em ate 48 horas.
+// ============================================================================
+
+const PROMPT_ATENDIMENTO_GERAL = `Voce e a Sophia, consultora da Stylus Formaturas (fotografia de formaturas), atendendo pelo WhatsApp.
+Esta pessoa NAO esta em nenhuma das nossas listas de atendimento. Voce nao tem nenhuma informacao
+sobre ela, sobre a formatura dela ou sobre fotos dela.
+
+COMO CONDUZIR:
+1. Primeira mensagem: cumprimente de forma calorosa e breve (use "bom dia/boa tarde/boa noite" se ela usou),
+   apresente-se como Sophia, da Stylus Formaturas, e pergunte como pode ajudar. Nao suponha o motivo do contato.
+2. Se o assunto for fotos, material fotografico, album, comprar fotos ou saber se as fotos ainda existem:
+   - NUNCA confirme que as fotos existem, que estao disponiveis, valores, quantidade de fotos ou prazos.
+   - Explique com gentileza que vai precisar de alguns dados para localizar o material dela e peca:
+     nome completo, CPF, curso, faculdade/instituicao e data (ou mes e ano) da formatura.
+   - Pode pedir tudo numa mensagem so, em lista curta. Se ela mandar so parte, agradeca e peca o que falta.
+   - Quando tiver TODOS os dados, use a acao "dados_completos" e, na resposta, agradeca e diga que vai
+     direcionar para um atendente da equipe consultar se o material ainda esta disponivel, com retorno em ate 48 horas.
+3. Outros assuntos (agendamento, duvidas, reclamacoes, parcerias etc.): se a BASE DE CONHECIMENTO responder, responda.
+   Se nao, peca o nome completo e um resumo do que precisa e use a acao "transferir_humano", dizendo que um
+   atendente vai retornar em ate 48 horas.
+4. Tom: educado, humano e objetivo. Frases curtas, no maximo 1 emoji. Uma pergunta por mensagem.
+   Nunca invente informacoes. Nunca fale de "sistema" ou de etapas internas.
+
+FORMATO DA RESPOSTA (obrigatorio): responda SOMENTE com um JSON valido:
+{"resposta": "texto para a pessoa", "acao": "nenhuma", "dados": {"nome_completo": "", "cpf": "", "curso": "", "faculdade": "", "data_formatura": "", "assunto": ""}}
+- "acao": "nenhuma" (conversa segue), "dados_completos" (assunto fotos e TODOS os 5 dados informados)
+  ou "transferir_humano" (outro assunto que precisa de atendente).
+- Em "dados" repita sempre tudo o que a pessoa ja informou na conversa ate agora (deixe vazio o que nao informou).`;
+
+const SCHEMA_ATENDIMENTO_GERAL = {
+  type: 'object',
+  properties: {
+    resposta: { type: 'string' },
+    acao: { type: 'string' },
+    dados: {
+      type: 'object',
+      properties: {
+        nome_completo: { type: 'string' },
+        cpf: { type: 'string' },
+        curso: { type: 'string' },
+        faculdade: { type: 'string' },
+        data_formatura: { type: 'string' },
+        assunto: { type: 'string' },
+      },
+    },
+  },
+  required: ['resposta', 'acao'],
+};
+
+interface RespostaAtendimentoGeral {
+  resposta: string;
+  acao: 'nenhuma' | 'dados_completos' | 'transferir_humano';
+  dados: Record<string, string>;
+}
+
+async function chamarGeminiAtendimentoGeral(
+  systemPrompt: string,
+  history: Array<{ role: string; parts: Array<{ text: string }> }>,
+  texto: string
+): Promise<{ r: RespostaAtendimentoGeral | null; erro: string }> {
+  const chave = Deno.env.get('GEMINI_API_KEY');
+  if (!chave) return { r: null, erro: 'GEMINI_API_KEY nao configurada' };
+  const genAI = new GoogleGenerativeAI(chave);
+  const erros: string[] = [];
+  for (const modelo of ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']) {
+    try {
+      const m = genAI.getGenerativeModel({
+        model: modelo,
+        systemInstruction: systemPrompt,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          // deno-lint-ignore no-explicit-any
+          responseSchema: SCHEMA_ATENDIMENTO_GERAL as any,
+          temperature: 0.5,
+        },
+      });
+      const res = await m.startChat({ history }).sendMessage(texto);
+      const obj = JSON.parse(res.response.text().replace(/```json|```/g, '').trim());
+      if (obj && typeof obj.resposta === 'string' && obj.resposta.trim()) {
+        const acao = ['dados_completos', 'transferir_humano'].includes(obj.acao) ? obj.acao : 'nenhuma';
+        return { r: { resposta: obj.resposta.trim(), acao, dados: obj.dados || {} }, erro: '' };
+      }
+      erros.push(`${modelo}: resposta vazia`);
+    } catch (e) {
+      erros.push(`${modelo}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 250));
+    }
+  }
+  return { r: null, erro: erros.join(' | ') };
+}
+
 async function executarFluxoIaPadrao(
   telefone: string,
   texto: string,
@@ -569,108 +664,110 @@ async function executarFluxoIaPadrao(
     contato = novoContato;
   }
 
+  // Historico recente (ultimas 20 mensagens), no formato do Gemini
   const { data: mensagens } = await sb
     .from('messages')
-    .select('*')
+    .select('direction, content')
     .eq('contact_id', contato.id)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(20);
+  const history = (mensagens || [])
+    .reverse()
+    .filter((m: any) => (m.content || '').trim())
+    .map((m: any) => ({ role: m.direction === 'in' ? 'user' : 'model', parts: [{ text: m.content }] }));
+  while (history.length && history[0].role !== 'user') history.shift();
 
-  const historico = (mensagens || []).reverse();
-  const textosFormandoSaaS = (mensagens || []).filter((m: any) => m.direction === 'in').map((m: any) => (m.content || '').toLowerCase());
+  // Registra a mensagem recebida
+  await sb.from('messages').insert({ contact_id: contato.id, direction: 'in', content: texto, sent_by: 'contato' });
 
-  const { data: baseConhecimentoBrutaPadrao } = await sb
+  const { data: baseBruta } = await sb
     .from('base_conhecimento_global')
     .select('pergunta, resposta, aplica_em')
     .eq('ativo', true);
+  const base = (baseBruta || []).filter((i: any) => (i.aplica_em || 'todos') === 'todos');
 
-  // Sem campanha ativa (fluxo padrao), so faz sentido usar as perguntas
-  // genericas ("todos"), nunca as especificas de agendamento ou venda de material
-  const baseConhecimento = (baseConhecimentoBrutaPadrao || []).filter(
-    (item: any) => (item.aplica_em || 'todos') === 'todos'
-  );
-
-  const resposta = await chamarGemini('', texto, {
-    nome: contato.name || 'Formando',
-    telefone: telefoneNormalizado,
-    curso: contato.course,
-    numero_contrato: contato.contract_number,
-    endereco: '',
-  }, [], baseConhecimento || []);
-
-  if (!resposta) {
-    await sb.from('messages').insert({
-      contact_id: contato.id,
-      direction: 'in',
-      content: texto,
-      sent_by: 'contato',
-    });
-    return;
+  let systemPrompt = PROMPT_ATENDIMENTO_GERAL;
+  systemPrompt += `\n\nData de hoje: ${new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Manaus' })}.`;
+  if (!history.some((h: any) => h.role === 'model')) {
+    systemPrompt += '\nEsta e a PRIMEIRA mensagem da pessoa: comece cumprimentando e se apresentando.';
+  }
+  if (base.length) {
+    systemPrompt += '\n\nBASE DE CONHECIMENTO (so use para duvidas gerais; nunca para confirmar fotos, valores ou prazos de alguem fora da base):\n' +
+      base.map((i: any) => `P: ${i.pergunta}\nR: ${i.resposta}`).join('\n\n');
   }
 
-  // Processa agendamento
-  if (resposta.includes('###AGENDAMENTO_CONFIRMADO###')) {
-    try {
-      const jsonMatch = resposta.match(/###AGENDAMENTO_CONFIRMADO###([\s\S]*?)###FIM###/);
-      if (jsonMatch && jsonMatch[1]) {
-        const dados = JSON.parse(jsonMatch[1].trim());
+  const { r, erro } = await chamarGeminiAtendimentoGeral(systemPrompt, history, texto);
 
-        const dataValida = /^\d{4}-\d{2}-\d{2}$/.test(dados.data);
-        if (!dataValida) {
-          console.error('[SaaS] Data invalida recebida da IA, abortando insert:', dados.data);
-        } else {
-          const horarioOuTurno = dados.turno || dados.horario || '';
-          const dataValidada = validarDataHorarioMencionado(dados.data, horarioOuTurno, textosFormandoSaaS, []);
+  let respostaFinal = '';
+  if (!r) {
+    // IA falhou: nunca deixa sem resposta
+    respostaFinal = history.some((h: any) => h.role === 'model')
+      ? 'Recebi sua mensagem! Vou verificar e já te retorno, tudo bem?'
+      : 'Olá! Tudo bem? Aqui é a Sophia, da Stylus Formaturas 😊 Me conta, como posso te ajudar?';
+    await registrarAlerta(sb, {
+      tipo: 'ia_sem_resposta',
+      gravidade: 'erro',
+      titulo: 'A IA falhou no atendimento geral',
+      detalhe: `Mensagem: "${texto.slice(0, 200)}". Foi enviada uma resposta padrao. Erro: ${erro || 'sem detalhe'}`,
+      contato_nome: contato.name,
+      telefone: telefoneNormalizado,
+    });
+  } else {
+    respostaFinal = r.resposta;
+    const d = r.dados || {};
+    const cpfDigitos = String(d.cpf || '').replace(/\D/g, '');
+    const completo = !!(String(d.nome_completo || '').trim().split(/\s+/).length >= 2 && cpfDigitos.length === 11 &&
+      String(d.curso || '').trim() && String(d.faculdade || '').trim() && String(d.data_formatura || '').trim());
 
-          if (!dataValidada) {
-            console.error('[SaaS] ALERTA: data/horario nao encontrado nas mensagens do formando - registrado para conferencia. contact_id:', contato.id, 'dados:', dados);
-            await sb.from('contacts').update({ revisao_humana: true }).eq('id', contato.id);
-            await registrarAlerta(sb, {
-              tipo: 'agendamento_conferir',
-              gravidade: 'atencao',
-              titulo: 'Agendamento para conferir',
-              detalhe: `A IA confirmou ${dados.data} (${dados.turno || dados.horario || 'sem turno'}), mas a data/turno nao aparece claramente nas mensagens do formando.`,
-              contato_nome: contato.name || null,
-              telefone: contato.phone || null,
-            });
-          }
-          const ok = await inserirAgendamento(sb, {
-            graduand_name: contato.name || 'Formando',
-            contract_number: contato.contract_number || 'Nao Informado',
-            course: contato.course || 'Outros',
-            date: dados.data,
-            shift: dados.turno || dados.horario || '',
-            location: dados.local || 'RESIDENCIA',
-            status: 'Em negociacao',
-            contact_id: contato.id,
-            seller_name: 'INDEFINIDO',
-            notes: dataValidada ? null : 'CONFERIR: a IA confirmou, mas a data/turno nao aparece claramente nas mensagens do formando.',
-          }, {});
-          if (ok) console.log(`[SaaS] Agendamento inserido para: ${contato.name}`);
-        }
-      }
-    } catch (e) {
-      console.error('[Erro] Falha ao parsear JSON de agendamento:', e);
+    if (r.acao === 'dados_completos' && !completo) {
+      // A IA achou que tinha tudo, mas falta algo (ou o CPF esta incompleto): continua pedindo
+      const faltando: string[] = [];
+      if (String(d.nome_completo || '').trim().split(/\s+/).length < 2) faltando.push('nome completo');
+      if (cpfDigitos.length !== 11) faltando.push('CPF completo (11 números)');
+      if (!String(d.curso || '').trim()) faltando.push('curso');
+      if (!String(d.faculdade || '').trim()) faltando.push('faculdade/instituição');
+      if (!String(d.data_formatura || '').trim()) faltando.push('data da formatura');
+      respostaFinal = `Obrigada! Pra eu localizar certinho, só falta me informar: ${faltando.join(', ')}.`;
+    } else if (r.acao === 'dados_completos' || r.acao === 'transferir_humano') {
+      const ehFotos = r.acao === 'dados_completos';
+      const nome = String(d.nome_completo || '').trim();
+      const cpfFmt = cpfDigitos.length === 11
+        ? `${cpfDigitos.slice(0, 3)}.${cpfDigitos.slice(3, 6)}.${cpfDigitos.slice(6, 9)}-${cpfDigitos.slice(9)}`
+        : '';
+      const resumo = ehFotos
+        ? `Fora da base - consultar fotos | Nome: ${nome} | CPF: ${cpfFmt} | Curso: ${d.curso} | Faculdade: ${d.faculdade} | Formatura: ${d.data_formatura}`
+        : `Fora da base - ${d.assunto || 'atendimento'} | Nome: ${nome || '-'}`;
+
+      const atualiza: Record<string, unknown> = { assigned_to: 'manual', observacao: resumo };
+      if (nome && /^\+?\d+$/.test(String(contato.name || '').trim())) atualiza.name = nome;
+      if (d.curso) atualiza.course = String(d.curso);
+      await sb.from('contacts').update(atualiza).eq('id', contato.id);
+
+      await registrarAlerta(sb, {
+        tipo: 'atendimento_humano',
+        gravidade: 'atencao',
+        titulo: ehFotos ? 'Consultar fotos de contato fora da base (retorno em 48h)' : 'Atendimento humano solicitado',
+        detalhe: resumo,
+        contato_nome: nome || contato.name,
+        telefone: telefoneNormalizado,
+      });
+
+      await enviarMensagemUazapi(
+        NUMERO_VENDEDOR_MATERIAL_LEGADO,
+        `📋 *${ehFotos ? 'Consulta de fotos - contato fora da base' : 'Atendimento humano solicitado'}*\n\n` +
+          `👤 *Nome:* ${nome || '-'}\n` +
+          (ehFotos
+            ? `🪪 *CPF:* ${cpfFmt}\n🎓 *Curso:* ${d.curso}\n🏫 *Faculdade:* ${d.faculdade}\n📅 *Formatura:* ${d.data_formatura}\n`
+            : `💬 *Assunto:* ${d.assunto || '-'}\n`) +
+          `📞 *Telefone:* ${telefoneNormalizado}\n\n` +
+          `👉 Prazo informado: retorno em até 48 horas. A conversa ficou em modo manual no painel.`
+      );
+      console.log(`[Atendimento geral] ${nome || telefoneNormalizado} repassado ao humano (${r.acao})`);
     }
   }
 
-  // Processa overflow
-  if (resposta.includes('###OVERFLOW###')) {
-    await sb.from('contacts').update({ assigned_to: 'manual' }).eq('id', contato.id);
-  }
-
-  const respostaLimpa = resposta
-    .replace(/###AGENDAMENTO_CONFIRMADO###[\s\S]*?###FIM###/g, '')
-    .replace(/###OVERFLOW###/g, '')
-    .replace(/###SEM_INTERESSE###/g, '')
-    .trim();
-
-  await sb.from('messages').insert([
-    { contact_id: contato.id, direction: 'in', content: texto, sent_by: 'contato' },
-    { contact_id: contato.id, direction: 'out', content: respostaLimpa, sent_by: 'ia' },
-  ]);
-
-  if (respostaLimpa) await enviarMensagemUazapi(telefone, respostaLimpa);
+  await sb.from('messages').insert({ contact_id: contato.id, direction: 'out', content: respostaFinal, sent_by: 'ia' });
+  await enviarMensagemUazapi(telefone, respostaFinal);
 }
 
 /**

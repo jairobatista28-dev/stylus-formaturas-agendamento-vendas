@@ -13,6 +13,7 @@ import {
   ShieldAlert,
   Bot,
   Receipt,
+  UserPlus,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
@@ -35,6 +36,7 @@ interface Alerta {
 }
 
 const TIPOS: Record<string, { rotulo: string; icone: typeof AlertTriangle }> = {
+  atendimento_humano: { rotulo: 'Novos atendimentos', icone: UserPlus },
   venda_pronta: { rotulo: 'Vendas prontas', icone: CreditCard },
   comprovante: { rotulo: 'Comprovantes', icone: Receipt },
   foto_falhou: { rotulo: 'Fotos não enviadas', icone: ImageOff },
