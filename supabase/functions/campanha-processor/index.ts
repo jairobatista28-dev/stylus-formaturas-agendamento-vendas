@@ -936,6 +936,9 @@ function validarDataHorarioMencionado(
 /**
  * Chama Gemini para resposta contextual
  */
+// Ultimo erro do Gemini (vai para o Painel de Alertas quando a IA nao responde)
+let ultimoErroGemini = '';
+
 async function chamarGemini(
   sb: any,
   promptIa: string,
@@ -1160,44 +1163,64 @@ Se a pergunta do contato nao estiver coberta em nenhuma base acima, diga que vai
     console.log('[Gemini] System Instruction:', systemInstruction.substring(0, 300) + '...');
     console.log('[Gemini] Historico tem', history.length, 'mensagens');
 
-    // Vendas usam o modelo mais capaz (lida melhor com objecoes); agendamento segue no lite
-    const nomeModelo = tipoAtendimento === 'venda_material' ? 'gemini-2.5-flash' : 'gemini-2.5-flash-lite';
+    // Vendas usam o modelo mais capaz (lida melhor com objecoes); agendamento segue no lite.
+    // Se o modelo principal falhar (cota, instabilidade, modelo indisponivel), tenta o lite.
+    // Ordem: modelo configurado no secret GEMINI_MODELO_VENDAS (opcional), o flash, o apelido
+    // "gemini-flash-latest" (sempre aponta para o flash mais novo) e por ultimo o lite,
+    // que e o que ja funcionava. Modelos repetidos ou vazios sao ignorados.
+    const modelos = (tipoAtendimento === 'venda_material'
+      ? [Deno.env.get('GEMINI_MODELO_VENDAS')?.trim(), 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']
+      : ['gemini-2.5-flash-lite']
+    ).filter((m, i, arr): m is string => !!m && arr.indexOf(m) === i);
     const genAI = new GoogleGenerativeAI(geminiApiKey);
+    const historico = history.length > 0 ? history : [];
+    const erros: string[] = [];
 
-    // 1a tentativa: saida estruturada (JSON)
-    try {
-      const modelJson = genAI.getGenerativeModel({
-        model: nomeModelo,
-        systemInstruction: systemInstruction + FORMATO_SAIDA_JSON,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          // deno-lint-ignore no-explicit-any
-          responseSchema: SCHEMA_RESPOSTA_IA as any,
-          temperature: 0.6,
-        },
-      });
-      const chatJson = modelJson.startChat({ history: history.length > 0 ? history : [] });
-      const resultJson = await chatJson.sendMessage(textoUsuario);
-      const bruto = resultJson.response.text();
-      const convertida = converterRespostaEstruturada(bruto);
-      if (convertida) {
-        console.log(`[Gemini] (${nomeModelo}, JSON) Resposta:`, convertida.substring(0, 120) + '...');
-        return convertida;
+    for (const nomeModelo of modelos) {
+      // 1a tentativa: saida estruturada (JSON)
+      try {
+        const modelJson = genAI.getGenerativeModel({
+          model: nomeModelo,
+          systemInstruction: systemInstruction + FORMATO_SAIDA_JSON,
+          generationConfig: {
+            responseMimeType: 'application/json',
+            // deno-lint-ignore no-explicit-any
+            responseSchema: SCHEMA_RESPOSTA_IA as any,
+            temperature: 0.6,
+          },
+        });
+        const resultJson = await modelJson.startChat({ history: historico }).sendMessage(textoUsuario);
+        const bruto = resultJson.response.text();
+        const convertida = converterRespostaEstruturada(bruto);
+        if (convertida && convertida.replace(/###[\s\S]*$/, '').trim()) {
+          console.log(`[Gemini] (${nomeModelo}, JSON) Resposta:`, convertida.substring(0, 120) + '...');
+          return convertida;
+        }
+        erros.push(`${nomeModelo} JSON invalido: ${String(bruto).slice(0, 120)}`);
+      } catch (e) {
+        erros.push(`${nomeModelo} JSON: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300));
       }
-      console.warn('[Gemini] JSON invalido, usando modo texto. Bruto:', bruto.substring(0, 200));
-    } catch (e) {
-      console.warn('[Gemini] Saida estruturada falhou, usando modo texto:', e);
+
+      // Plano B: modo texto com marcadores (comportamento anterior)
+      try {
+        const model = genAI.getGenerativeModel({ model: nomeModelo, systemInstruction });
+        const result = await model.startChat({ history: historico }).sendMessage(textoUsuario);
+        const response = result.response.text();
+        if (response && response.trim()) {
+          console.log(`[Gemini] (${nomeModelo}, texto) Resposta:`, response.substring(0, 100) + '...');
+          return response;
+        }
+        erros.push(`${nomeModelo} texto: resposta vazia`);
+      } catch (e) {
+        erros.push(`${nomeModelo} texto: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300));
+      }
     }
 
-    // Plano B: modo texto com marcadores (comportamento anterior)
-    const model = genAI.getGenerativeModel({ model: nomeModelo, systemInstruction });
-    const chat = model.startChat({ history: history.length > 0 ? history : [] });
-    const result = await chat.sendMessage(textoUsuario);
-    const response = result.response.text();
-
-    console.log(`[Gemini] (${nomeModelo}, texto) Resposta:`, response.substring(0, 100) + '...');
-    return response;
+    ultimoErroGemini = erros.join(' | ');
+    console.error('[Gemini] Todas as tentativas falharam:', ultimoErroGemini);
+    return '';
   } catch (err) {
+    ultimoErroGemini = err instanceof Error ? err.message : String(err);
     console.error('[Gemini] Erro:', err);
     return '';
   }
@@ -2005,6 +2028,20 @@ todas as fotos sao tratadas e em alta resolucao e conduza para a escolha da opca
     }
   }
 
+  // PRIMEIRO CONTATO: se ainda nao existe nenhuma mensagem nossa no historico, o formando
+  // pode querer qualquer coisa (comprar, agendar, tirar duvida). A IA cumprimenta primeiro.
+  if (!history.some((h) => h.role === 'model')) {
+    contextoAgendamento += `
+
+## PRIMEIRO CONTATO (regra prioritaria nesta resposta)
+Ainda nao ha nenhuma mensagem nossa nesta conversa. Comece cumprimentando de forma calorosa e
+breve (use o periodo do dia se ele usou, ex: "Boa noite!"), apresente-se como Sophia, da Stylus
+Formaturas, e responda o que ele disse. Se ele so cumprimentou, pergunte como pode ajudar, sem
+supor o motivo do contato (pode ser compra das fotos, agendamento ou outra duvida). Nao apresente
+valores nem condicoes antes de ele demonstrar interesse. Nesta resposta a regra de "nunca se
+reapresente" nao se aplica.`;
+  }
+
   let respostaIA = await chamarGemini(
     sb,
     campanha.prompt_ia || '',
@@ -2059,11 +2096,18 @@ disse e, se fizer sentido, pergunte qual das opcoes ele prefere.`;
   }
 
   if (!respostaIA) {
+    // Primeira mensagem do formando e a IA falhou: nao deixa sem resposta.
+    // Cumprimenta e pergunta como pode ajudar (pode ser compra, agendamento ou outra coisa).
+    const primeiraMensagem = history.length === 0;
+    if (primeiraMensagem) {
+      const pn = primeiroNome(nomeCompleto);
+      respostaIA = `Olá${pn ? ', ' + pn : ''}! Tudo bem? Aqui é a Sophia, da Stylus Formaturas 😊 Me conta, como posso te ajudar?`;
+    }
     await registrarAlerta(sb, {
       tipo: 'ia_sem_resposta',
       gravidade: 'erro',
-      titulo: 'A IA nao respondeu',
-      detalhe: `O Gemini nao devolveu resposta para a mensagem: "${String(texto_resposta).slice(0, 300)}". Responda manualmente.`,
+      titulo: primeiraMensagem ? 'A IA falhou: foi enviada a saudacao padrao' : 'A IA nao respondeu',
+      detalhe: `Mensagem do formando: "${String(texto_resposta).slice(0, 200)}". ${primeiraMensagem ? 'Acompanhe a conversa.' : 'Responda manualmente.'} Erro: ${ultimoErroGemini || 'sem detalhe'}`,
       contato_nome: nomeCompleto,
       telefone,
     });

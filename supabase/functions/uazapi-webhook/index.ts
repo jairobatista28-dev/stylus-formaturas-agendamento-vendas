@@ -438,8 +438,11 @@ async function transcreverAudio(url: string, mimeHint?: string | null): Promise<
     for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     const base64 = btoa(bin);
 
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${chave}`,
+    // Tenta o flash, o apelido mais novo e por ultimo o lite (todos entendem audio)
+    let resp: Response | null = null;
+    for (const modelo of ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']) {
+      resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${chave}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -459,9 +462,12 @@ async function transcreverAudio(url: string, mimeHint?: string | null): Promise<
           generationConfig: { temperature: 0 },
         }),
       }
-    );
-    if (!resp.ok) {
-      console.error(`[Audio] Gemini ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+      );
+      if (resp.ok) break;
+      console.error(`[Audio] ${modelo} falhou: ${resp.status}`);
+    }
+    if (!resp || !resp.ok) {
+      console.error(`[Audio] Gemini ${resp?.status}: ${resp ? (await resp.text()).slice(0, 200) : ''}`);
       return null;
     }
     const j = await resp.json();
