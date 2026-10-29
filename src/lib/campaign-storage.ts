@@ -33,6 +33,7 @@ export interface Campanha {
   criado_em: string;
   contatos: ContatoCampanha[];
   tipo_atendimento?: 'visita_externa' | 'escritorio' | 'venda_material';
+  modalidade_venda?: 'padrao' | 'ultima_oportunidade';
   opcoes_agendamento?: Array<{ data: string; turnos: string[]; horarios?: string[] }>;
 }
 
@@ -59,7 +60,7 @@ export async function fetchCampanhas(): Promise<{ data: Campanha[]; source: 'sup
   try {
     const { data, error } = await supabase
       .from('campanhas')
-      .select('id, nome, descricao, mensagem_inicial, prompt_ia, status, criado_em, opcoes_agendamento, tipo_atendimento')
+      .select('*')
       .order('criado_em', { ascending: false });
 
     if (error) {
@@ -125,6 +126,8 @@ export async function createCampanha(
         mensagem_inicial: campanha.mensagem_inicial,
         prompt_ia: campanha.prompt_ia,
         tipo_atendimento: (campanha as any).tipo_atendimento || 'visita_externa',
+        // So envia a coluna quando e a campanha nova (campanhas antigas nao dependem dela)
+        ...((campanha as any).modalidade_venda ? { modalidade_venda: (campanha as any).modalidade_venda } : {}),
         opcoes_agendamento: (campanha as any).opcoes_agendamento || null,
         status: 'rascunho',
       })

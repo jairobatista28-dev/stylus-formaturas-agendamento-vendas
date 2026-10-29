@@ -13,7 +13,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
  *  6. Gemini escolhe a melhor entre algumas fotos verticais
  *  7. Envia pela Uazapi (visualizacao unica, se habilitado) com a frase configurada
  *
- * Acoes: testar | previa | enviar
+ * Acoes: testar | previa | enviar | enviar_kit (3 fotos: beca / familia, campanha Ultima Oportunidade)
  */
 
 const corsHeaders = {
@@ -403,6 +403,81 @@ async function escolherMelhor(imagens: string[], nome: string): Promise<{ indice
 }
 
 // ============================================================================
+// KIT DE FOTOS (campanha "Ultima Oportunidade"): 3 fotos, de preferencia
+// o formando de beca e com a familia, em visualizacao unica
+// ============================================================================
+
+const MAX_CANDIDATAS_KIT = 12;
+
+/** Ate 12 candidatas espalhadas pelo album, misturando verticais (beca/individual) e horizontais (familia/grupo) */
+function selecionarCandidatasKit(fotos: FotoMA[]): FotoMA[] {
+  const validas = fotos.filter((f) => f.RenderMain && !f.FlBrinde);
+  if (validas.length <= MAX_CANDIDATAS_KIT) return validas;
+  const espalhar = (lista: FotoMA[], n: number) => {
+    if (lista.length <= n) return lista;
+    const passo = lista.length / n;
+    return Array.from({ length: n }, (_, i) => lista[Math.floor(i * passo + passo / 2)]);
+  };
+  const verticais = validas.filter((f) => (f.Height || 0) > (f.Width || 0));
+  const horizontais = validas.filter((f) => (f.Height || 0) <= (f.Width || 0));
+  const nHoriz = Math.min(horizontais.length, 5);
+  const nVert = Math.min(verticais.length, MAX_CANDIDATAS_KIT - nHoriz);
+  const escolhidas = [...espalhar(verticais, nVert), ...espalhar(horizontais, nHoriz)];
+  if (escolhidas.length < MAX_CANDIDATAS_KIT) {
+    for (const f of espalhar(validas, MAX_CANDIDATAS_KIT)) {
+      if (escolhidas.length >= MAX_CANDIDATAS_KIT) break;
+      if (!escolhidas.includes(f)) escolhidas.push(f);
+    }
+  }
+  return escolhidas;
+}
+
+/** Gemini escolhe as N melhores, priorizando: formando de beca (individual) e com a familia */
+async function escolherKit(imagens: string[], nome: string, quantidade: number): Promise<{ indices: number[]; motivo: string }> {
+  const padrao = imagens.map((_, i) => i).slice(0, quantidade);
+  const chave = Deno.env.get('GEMINI_API_KEY');
+  if (!chave || imagens.length <= quantidade) return { indices: padrao, motivo: 'padrao' };
+  const parts: any[] = imagens.map((b64) => ({ inline_data: { mime_type: 'image/jpeg', data: b64 } }));
+  parts.push({
+    text:
+      `Estas sao ${imagens.length} fotos (indices 0 a ${imagens.length - 1}, na ordem) da formatura de ${nome}. ` +
+      `Escolha as ${quantidade} MELHORES (indices diferentes) para enviar a essa pessoa como previa, para ela sentir vontade de ter as fotos. ` +
+      `Prioridade: 1) o/a formando/a DE BECA em destaque, rosto bem visivel e bonito (olhos abertos, de preferencia sorrindo); ` +
+      `2) o/a formando/a COM A FAMILIA (pais, avos, filhos, parceiro), todos de frente e bem enquadrados; ` +
+      `3) outra foto marcante do/a formando/a (com diploma, capelo, momento da cerimonia). ` +
+      `Se possivel, inclua pelo menos uma de beca e uma com a familia. Evite fotos borradas, de costas, olhos fechados, ` +
+      `fotos repetidas/muito parecidas entre si e fotos em que a pessoa aparece pequena. ` +
+      `Responda SOMENTE JSON: {"fotos": [{"indice": numero, "tipo": "beca" | "familia" | "outra"}], "motivo": "frase curta"}, ` +
+      `na ordem em que devem ser enviadas (beca primeiro, familia depois).`,
+  });
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${chave}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { responseMimeType: 'application/json', temperature: 0 } }),
+      }
+    );
+    if (!res.ok) return { indices: padrao, motivo: `gemini_${res.status}` };
+    const j = await res.json();
+    const out = JSON.parse((j?.candidates?.[0]?.content?.parts?.[0]?.text || '{}').replace(/```json|```/g, '').trim());
+    const indices: number[] = [];
+    for (const f of Array.isArray(out?.fotos) ? out.fotos : []) {
+      const idx = Number(f?.indice);
+      if (Number.isInteger(idx) && idx >= 0 && idx < imagens.length && !indices.includes(idx)) indices.push(idx);
+      if (indices.length >= quantidade) break;
+    }
+    // Completa se o Gemini devolveu menos do que o pedido
+    for (let i = 0; indices.length < quantidade && i < imagens.length; i++) if (!indices.includes(i)) indices.push(i);
+    return { indices, motivo: String(out?.motivo || '') };
+  } catch (e) {
+    console.warn('[Fotos] Gemini (kit) falhou:', e);
+  }
+  return { indices: padrao, motivo: 'fallback' };
+}
+
+// ============================================================================
 // FLUXO PRINCIPAL
 // ============================================================================
 
@@ -428,7 +503,7 @@ function tokenDaConta(): string | null {
  * meusalbuns_fotos). Nao depende do login no site: os enderecos das fotos
  * (hash + token) abrem sem login.
  */
-async function prepararFoto(sb: any, contatoCampanhaId: string, excluirHashes: string[] = []) {
+async function prepararFoto(sb: any, contatoCampanhaId: string, excluirHashes: string[] = [], quantidadeKit = 0) {
   const log: string[] = [];
   const { data: cc } = await sb
     .from('contatos_campanha')
@@ -472,7 +547,7 @@ async function prepararFoto(sb: any, contatoCampanhaId: string, excluirHashes: s
   // Evita repetir a mesma foto ja enviada (resgate / novo pedido de previa)
   const ineditas = todas.filter((f) => !excluirHashes.some((h) => h && String(h).includes(f.RenderMain)));
   const fotos = ineditas.length ? ineditas : todas;
-  const candidatas = selecionarCandidatas(fotos);
+  const candidatas = quantidadeKit > 0 ? selecionarCandidatasKit(fotos) : selecionarCandidatas(fotos);
 
   // Tokens a tentar: o do aluno e, se ele vencer, os das sincronizacoes mais recentes
   const tokens: string[] = [linha.token_foto];
@@ -503,6 +578,14 @@ async function prepararFoto(sb: any, contatoCampanhaId: string, excluirHashes: s
   }
   log.push(`Candidatas baixadas: ${baixadas.length}/${candidatas.length}`);
   if (!baixadas.length) return { ok: false, motivo: 'token_vencido', log, cc, aluno };
+
+  if (quantidadeKit > 0) {
+    const kit = await escolherKit(baixadas.map((b) => b.base64), aluno.NomeAluno, quantidadeKit);
+    const fotosKit = kit.indices.map((i) => baixadas[i]).filter(Boolean);
+    log.push(`Kit escolhido: ${kit.indices.join(', ')} (${kit.motivo})`);
+    await sb.from('contatos_campanha').update({ meusalbuns_aluno: aluno.AlunoTurmaID_Cript }).eq('id', cc.id);
+    return { ok: true, log, cc, aluno, foto: fotosKit[0], fotosKit, motivoEscolha: kit.motivo };
+  }
 
   const escolha = await escolherMelhor(baixadas.map((b) => b.base64), aluno.NomeAluno);
   // Se o Gemini achar que nenhuma serve, ainda assim manda a primeira candidata
@@ -575,7 +658,7 @@ async function enviarImagemUazapi(telefone: string, base64: string, legenda: str
         number: telefone,
         type: 'image',
         file: `data:image/jpeg;base64,${base64}`,
-        text: legenda,
+        ...(legenda ? { text: legenda } : {}),
         ...(viewOnce ? { viewOnce: true } : {}),
       }),
     });
@@ -629,7 +712,7 @@ serve(async (req) => {
           pit: String(a.pit || ''),
           qtd_fotos: Number(a.qtd) || null,
           token_foto: String(a.token),
-          fotos: a.fotos.slice(0, 20).map((f: any) => ({ h: String(f.h), w: Number(f.w) || 0, a: Number(f.a) || 0 })),
+          fotos: a.fotos.slice(0, 30).map((f: any) => ({ h: String(f.h), w: Number(f.w) || 0, a: Number(f.a) || 0 })),
           atualizado_em: new Date().toISOString(),
         }));
       if (linhas.length) {
@@ -715,6 +798,105 @@ serve(async (req) => {
       }
       console.log(`[Fotos] Foto enviada para ${r.cc.nome} (origem ${body.origem || 'ia'})`);
       return json({ success: true, log: r.log });
+    }
+
+    // Kit de fotos (campanha Ultima Oportunidade): texto curto + N fotos (padrao 3),
+    // de preferencia de beca e com a familia, em visualizacao unica. Uma vez por formando.
+    //  legenda: texto enviado ANTES das fotos ({nome} = primeiro nome)
+    if (acao === 'enviar_kit') {
+      const { data: cfg } = await sb.from('resgate_config').select('fotos_ativas, fotos_visualizacao_unica').eq('id', 1).maybeSingle();
+      const manual = body.origem === 'manual';
+      if (!manual && !cfg?.fotos_ativas) return json({ success: false, motivo: 'fotos_desativadas' });
+
+      const quantidade = Math.min(Math.max(Number(body.quantidade) || 3, 1), 5);
+      // Trava: so um envio do kit por formando, mesmo se ele mandar varias mensagens seguidas
+      // (fotos_kit_enviadas: 0 = nunca enviado, -1 = enviando agora, -2 = falhou, >0 = quantidade enviada)
+      const idCC = body.contato_campanha_id;
+      const { data: trava } = await sb
+        .from('contatos_campanha')
+        .update({ fotos_kit_enviadas: -1 })
+        .eq('id', idCC)
+        .eq('fotos_kit_enviadas', 0)
+        .select('id')
+        .maybeSingle();
+      if (!trava && !body.forcar) return json({ success: false, motivo: 'foto_ja_enviada' });
+      // Falhou (ex: turma nao sincronizada): marca -2 para nao tentar de novo a cada mensagem
+      const liberarTrava = async () => {
+        await sb.from('contatos_campanha').update({ fotos_kit_enviadas: -2 }).eq('id', idCC).eq('fotos_kit_enviadas', -1);
+      };
+
+      const r: any = await prepararFoto(sb, idCC, [], quantidade);
+      if (!r.ok || !r.fotosKit?.length) {
+        await liberarTrava();
+        console.warn('[Fotos] Kit nao enviado:', r.motivo, r.log);
+        if (!manual && r.cc) await alertarFalhaFoto(sb, r.cc.nome, r.cc.numero_contrato, r.motivo || 'fotos_indisponiveis', undefined, r.cc.telefone);
+        return json({ success: false, motivo: r.motivo || 'fotos_indisponiveis', log: r.log });
+      }
+
+      const url = Deno.env.get('UAZAPI_BASE_URL')?.trim();
+      const token = Deno.env.get('UAZAPI_TOKEN')?.trim();
+      const viewOnce = cfg?.fotos_visualizacao_unica !== false;
+      const pn = primeiroNome(r.cc.nome);
+      const total = r.fotosKit.length;
+      const legendaPadrao = `Separei ${total === 1 ? 'uma foto sua' : `${total} fotos suas`} da formatura pra você ver como ficou${total === 1 ? '' : 'ram'}${pn ? ', {nome}' : ''} 📸${viewOnce ? ` ${total === 1 ? 'Ela abre' : 'Elas abrem'} uma única vez, então olha com calma 😊` : ''}`;
+      const intro = String(body.legenda || legendaPadrao).replace(/\{nome\}/gi, pn).trim();
+
+      const { data: contato } = await sb.from('contacts').select('id').eq('phone', r.cc.telefone).maybeSingle();
+
+      // Texto curto antes das fotos (foto em visualizacao unica nao mostra legenda de forma confiavel)
+      if (url && token && intro) {
+        try {
+          await fetch(`${url}/send/text`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', token },
+            body: JSON.stringify({ number: r.cc.telefone, text: intro }),
+          });
+          if (contato?.id) {
+            await sb.from('messages').insert({ contact_id: contato.id, direction: 'out', content: intro, sent_by: 'ia', seq: 0 });
+          }
+        } catch (e) {
+          console.warn('[Fotos] Falha ao enviar texto do kit:', e);
+        }
+      }
+
+      let enviadas = 0;
+      const urls: string[] = [];
+      for (const f of r.fotosKit) {
+        await new Promise((res) => setTimeout(res, 1500 + Math.random() * 1500));
+        let envio = await enviarImagemUazapi(r.cc.telefone, f.base64, '', viewOnce);
+        if (!envio.ok && viewOnce) envio = await enviarImagemUazapi(r.cc.telefone, f.base64, '', false);
+        if (!envio.ok) {
+          console.warn('[Fotos] Falha no envio de uma foto do kit:', envio.erro);
+          continue;
+        }
+        enviadas++;
+        urls.push(f.url);
+        if (contato?.id) {
+          await sb.from('messages').insert({
+            contact_id: contato.id,
+            direction: 'out',
+            content: `[Foto do formando enviada${viewOnce ? ' - visualização única' : ''}] (${enviadas}/${total})`,
+            sent_by: 'ia',
+            seq: 0,
+            message_type: 'image',
+            media_url: f.url,
+          });
+        }
+      }
+
+      if (!enviadas) {
+        await liberarTrava();
+        if (!manual) await alertarFalhaFoto(sb, r.cc.nome, r.cc.numero_contrato, 'envio_falhou', undefined, r.cc.telefone);
+        return json({ success: false, motivo: 'envio_falhou', log: r.log });
+      }
+
+      await sb.from('contatos_campanha').update({
+        foto_enviada_em: new Date().toISOString(),
+        foto_enviada_url: urls.join(' '),
+        fotos_kit_enviadas: enviadas,
+      }).eq('id', r.cc.id);
+      console.log(`[Fotos] Kit com ${enviadas} foto(s) enviado para ${r.cc.nome} (origem ${body.origem || 'ia'})`);
+      return json({ success: true, enviadas, log: r.log });
     }
 
     return json({ error: 'Acao desconhecida' }, 400);

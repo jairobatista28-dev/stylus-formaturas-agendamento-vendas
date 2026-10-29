@@ -16,6 +16,7 @@ import {
   HardDrive,
   Calendar,
   RotateCcw,
+  Sparkles,
 } from 'lucide-react';
 import { useToast } from '../hooks/useToast';
 import { ToastContainer } from '../components/Toast';
@@ -34,6 +35,7 @@ import { supabase } from '../lib/supabase';
 import * as XLSX from 'xlsx';
 import { CampaignReportModal } from '../components/CampaignReportModal';
 import { EnvioSeguroPanel } from '../components/EnvioSeguroPanel';
+import { MENSAGEM_ULTIMA_OPORTUNIDADE, PROMPT_ULTIMA_OPORTUNIDADE } from '../lib/modelos-ultima-oportunidade';
 
 const TURNOS_HORARIOS: Record<string, string> = {
   'Manha (8h as 12h)': 'Manha entre 08:00 e 12:00',
@@ -46,7 +48,9 @@ const ESCRITORIO_HORARIOS_TARDE = ['13:00', '14:00', '15:00', '16:00', '17:00'];
 
 const ESCRITORIO_ENDERECO = 'Escritorio - Rua Judith Motta, Parque 10 de Novembro, Manaus - AM, CEP 69055-280';
 
-type TipoAtendimento = 'visita_externa' | 'escritorio' | 'venda_material';
+// 'venda_ultima' e so do formulario: salva como tipo_atendimento = 'venda_material'
+// + modalidade_venda = 'ultima_oportunidade' (venda sem visita, valores de pre-venda)
+type TipoAtendimento = 'visita_externa' | 'escritorio' | 'venda_material' | 'venda_ultima';
 
 // CPF vindo do Excel pode perder zeros a esquerda (vira numero) - repoe ate 11 digitos
 function normalizarCpfPlanilha(valor: unknown): string | undefined {
@@ -138,6 +142,7 @@ export function Campaigns() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { toasts, showToast, removeToast } = useToast();
+  const ehVenda = tipoAtendimento === 'venda_material' || tipoAtendimento === 'venda_ultima';
 
   useEffect(() => {
     loadCampanhas();
@@ -296,7 +301,12 @@ export function Campaigns() {
         const contato = contatosComUUID[idx];
         const templateEscolhido = variantesMensagem[idx % variantesMensagem.length];
 
+        const primeiroNome = (() => {
+          const p = String(contato.nome || '').trim().split(/\s+/)[0] || '';
+          return p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : '';
+        })();
         let mensagemPersonalizada = templateEscolhido
+          .replace(/\{primeiro_nome\}/gi, primeiroNome)
           .replace(/\{\{nome\}\}/gi, contato.nome)
           .replace(/{nome}/gi, contato.nome)
           .replace(/\{datas_disponiveis\}/gi, textoDatasFormatado);
@@ -309,6 +319,8 @@ export function Campaigns() {
             .replace(/\{formas_pagamento\}/gi, contato.formas_pagamento || 'consulte as opcoes disponiveis')
             .replace(/\{opcoes_plano\}/gi, contato.opcoes_plano || 'consulte as opcoes disponiveis')
             .replace(/\{prazo_reciclagem\}/gi, contato.prazo_reciclagem || 'em breve')
+            .replace(/\{prazo_pre_venda\}/gi, contato.prazo_reciclagem || 'em breve')
+            .replace(/\{prazo_final\}/gi, contato.prazo_reciclagem || 'em breve')
             .replace(/\{quantidade_fotos\}/gi, (contato as any).quantidade_fotos || 'nao informado');
         }
 
@@ -466,10 +478,10 @@ export function Campaigns() {
     const contratoIdx = headers.findIndex((h) => h.includes('contrato') || h.includes('numero_contrato') || h.includes('numero contrato'));
     const dataIdx = headers.findIndex((h) => h === 'data' || h.includes('data '));
     const valorTabelaIdx = headers.findIndex((h) => h.includes('valor_tabela') || h.includes('valor tabela'));
-    const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido'));
+    const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido') || (h.includes('valor') && (h.includes('pre_venda') || h.includes('pre venda') || h.includes('pre-venda') || h.includes('prevenda'))));
     const formasPagamentoIdx = headers.findIndex((h) => h.includes('formas_pagamento') || h.includes('formas de pagamento') || h.includes('pagamento'));
     const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
-    const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem'));
+    const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem') || h.includes('prazo'));
     const quantidadeFotosIdx = headers.findIndex((h) => h.includes('quantidade_fotos') || h.includes('quantidade de fotos') || h.includes('qtd_fotos') || h.includes('qtd fotos') || h.includes('numero de fotos'));
     const cpfIdx = headers.findIndex((h) => h.includes('cpf'));
     const emailIdx = headers.findIndex((h) => h.includes('email') || h.includes('e-mail') || h.includes('e mail'));
@@ -558,10 +570,10 @@ export function Campaigns() {
       const contratoIdx = headers.findIndex((h) => h.includes('contrato') || h.includes('numero_contrato'));
       const dataIdx = headers.findIndex((h) => h === 'data' || h.includes('data '));
       const valorTabelaIdx = headers.findIndex((h) => h.includes('valor_tabela') || h.includes('valor tabela'));
-      const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido'));
+      const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido') || (h.includes('valor') && (h.includes('pre_venda') || h.includes('pre venda') || h.includes('pre-venda') || h.includes('prevenda'))));
       const formasPagamentoIdx = headers.findIndex((h) => h.includes('formas_pagamento') || h.includes('formas de pagamento') || h.includes('pagamento'));
       const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
-      const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem'));
+      const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem') || h.includes('prazo'));
       const quantidadeFotosIdx = headers.findIndex((h) => h.includes('quantidade_fotos') || h.includes('quantidade de fotos') || h.includes('qtd_fotos') || h.includes('qtd fotos') || h.includes('numero de fotos'));
       const cpfIdx = headers.findIndex((h) => h.includes('cpf'));
       const emailIdx = headers.findIndex((h) => h.includes('email') || h.includes('e-mail') || h.includes('e mail'));
@@ -669,8 +681,8 @@ export function Campaigns() {
     // de conhecimento). Se as datas usadas forem todas do mesmo tipo,
     // mantem esse tipo; se misturar visita externa e escritorio na mesma
     // campanha, marca como "mista".
-    let tipoParaSalvar: string = tipoAtendimento;
-    if (tipoAtendimento !== 'venda_material') {
+    let tipoParaSalvar: string = tipoAtendimento === 'venda_ultima' ? 'venda_material' : tipoAtendimento;
+    if (!ehVenda) {
       const tiposUsados = new Set(opcoesJson.map((o) => o.tipo));
       tipoParaSalvar = tiposUsados.size > 1 ? 'mista' : (opcoesJson[0]?.tipo || tipoAtendimento);
     }
@@ -682,7 +694,8 @@ export function Campaigns() {
         mensagem_inicial: formData.mensagem_inicial.trim(),
         prompt_ia: formData.prompt_ia.trim() || null,
         tipo_atendimento: tipoParaSalvar,
-        opcoes_agendamento: opcoesJson.length > 0 ? opcoesJson : undefined,
+        ...(tipoAtendimento === 'venda_ultima' ? { modalidade_venda: 'ultima_oportunidade' } : {}),
+        opcoes_agendamento: !ehVenda && opcoesJson.length > 0 ? opcoesJson : undefined,
       } as any,
       uploadedContacts
     );
@@ -781,6 +794,15 @@ export function Campaigns() {
                     >
                       {STATUS_CONFIG[campanha.status]?.label || campanha.status}
                     </span>
+                    {campanha.modalidade_venda === 'ultima_oportunidade' && (
+                      <span
+                        className="px-2 py-1 rounded text-xs font-medium flex items-center gap-1"
+                        style={{ color: 'var(--warning)', backgroundColor: 'rgba(245, 158, 11, 0.15)' }}
+                      >
+                        <Sparkles size={12} />
+                        Última oportunidade
+                      </span>
+                    )}
                   </div>
                   {campanha.descricao && (
                     <p className="text-sm mb-2" style={{ color: 'var(--text-muted)' }}>
@@ -983,8 +1005,63 @@ export function Campaigns() {
                       />
                       <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Venda de Material Fotografico</span>
                     </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="tipoAtendimento"
+                        value="venda_ultima"
+                        checked={tipoAtendimento === 'venda_ultima'}
+                        onChange={() => {
+                          setTipoAtendimento('venda_ultima');
+                          setOpcoesAgendamento([]);
+                        }}
+                        className="w-4 h-4"
+                      />
+                      <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Venda - Ultima Oportunidade (pre-venda)</span>
+                    </label>
                   </div>
                 </div>
+
+                {tipoAtendimento === 'venda_ultima' && (
+                  <div className="space-y-2 p-3 rounded-lg" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--warning)' }}>
+                    <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                      Para formandos que <strong>agendaram e nao compraram</strong> ou que <strong>nunca agendaram</strong>.
+                      A IA vende tudo pelo WhatsApp, <strong>sem visita</strong>, mantendo o valor de pre-venda como ultima
+                      oportunidade. Na primeira resposta do formando ela envia <strong>3 fotos dele (beca/familia) em
+                      visualizacao unica</strong>, apresenta os valores e, quando ele escolher a opcao, confere CPF/e-mail e
+                      passa para o atendimento humano (link de pagamento + envio das fotos). A IA nunca fala de reciclagem
+                      nem de perda das fotos e ignora conversas antigas de agendamento.
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                      Colunas da planilha: <strong>nome</strong>, <strong>telefone</strong>, <strong>numero_contrato</strong>,{' '}
+                      <strong>valor_tabela</strong>, <strong>valor_oferecido</strong> (ou valor_pre_venda),{' '}
+                      <strong>formas_pagamento</strong>, <strong>opcoes_plano</strong> (opcional),{' '}
+                      <strong>prazo_reciclagem</strong> ou <strong>prazo_pre_venda</strong> (data final da pre-venda),{' '}
+                      <strong>quantidade_fotos</strong>, <strong>email</strong> e <strong>cpf</strong>.
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--info)' }}>
+                      Variaveis: {`{primeiro_nome}`}, {`{quantidade_fotos}`}, {`{valor_tabela}`}, {`{valor_oferecido}`},{' '}
+                      {`{formas_pagamento}`}, {`{prazo_pre_venda}`}. Com a "abertura em dois passos" ligada (Envio seguro),
+                      apague a primeira linha (cumprimento) da mensagem.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      style={{ padding: '6px 12px', fontSize: '12px' }}
+                      onClick={() => {
+                        setFormData((f) => ({
+                          ...f,
+                          mensagem_inicial: MENSAGEM_ULTIMA_OPORTUNIDADE,
+                          prompt_ia: PROMPT_ULTIMA_OPORTUNIDADE,
+                        }));
+                        showToast('Mensagem e prompt da Ultima Oportunidade carregados', 'success');
+                      }}
+                    >
+                      <Sparkles size={14} />
+                      Usar modelo pronto (mensagem + prompt)
+                    </button>
+                  </div>
+                )}
 
                 {tipoAtendimento === 'venda_material' && (
                   <div className="space-y-2 p-3 rounded-lg" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border)' }}>
@@ -1008,7 +1085,7 @@ export function Campaigns() {
                 )}
 
                 {/* Dates and Times */}
-                {tipoAtendimento !== 'venda_material' && (
+                {!ehVenda && (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>

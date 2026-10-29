@@ -58,12 +58,13 @@ try {
     const tk = (html.match(/var\\s+token\\s*=\\s*"([^"]+)"/) || [])[1];
     try { return { fotos: JSON.parse(html.slice(abre, fim + 1)), token: tk }; } catch { return null; }
   };
+  const espalhar = (lista, n) => { if (lista.length <= n) return lista; const p = lista.length / n; return Array.from({ length: n }, (_, i) => lista[Math.floor(i * p + p / 2)]); };
   const escolher = (fotos) => {
     const v = fotos.filter((f) => f.RenderMain && !f.FlBrinde);
     const vert = v.filter((f) => (f.Height || 0) > (f.Width || 0));
-    const base = vert.length >= 3 ? vert : v;
-    if (base.length <= 15) return base;
-    const p = base.length / 15; return Array.from({ length: 15 }, (_, i) => base[Math.floor(i * p + p / 2)]);
+    const horiz = v.filter((f) => (f.Height || 0) <= (f.Width || 0));
+    if (vert.length < 3) return espalhar(v, 25);
+    return [...espalhar(vert, 15), ...espalhar(horiz, 10)];
   };
   let feitos = 0, ok = 0, falhas = 0, buffer = [];
   const enviar = async () => { if (!buffer.length) return; const b = buffer; buffer = []; await post({ acao: 'sincronizar', alunos: b }); };

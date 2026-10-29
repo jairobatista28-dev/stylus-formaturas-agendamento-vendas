@@ -233,6 +233,54 @@ async function obterContactId(sb: any, telefone: string, nome?: string | null): 
   return novo?.id;
 }
 
+/**
+ * CAMPANHA "ULTIMA OPORTUNIDADE" (venda sem visita): no primeiro envio para o
+ * formando, deixa o caminho livre para a IA de vendas desta campanha:
+ *  - encerra conversas antigas (ex: de agendamento) que ainda esperavam resposta,
+ *    para a resposta dele nao cair no fluxo antigo;
+ *  - devolve o contato para a IA (pode ter ficado em modo manual no passado);
+ *  - impede que campanhas de venda antigas mandem resgate/retorno para ele.
+ */
+async function prepararUltimaOportunidade(sb: any, contatoId: string, campanhaId: string, telefone: string, contactId?: string) {
+  try {
+    const tel = normalizePhone(telefone);
+    const telefones = [...new Set([telefone, tel])];
+    await sb
+      .from("conversa_estado")
+      .update({ aguardando_resposta: false, status: "concluido", updated_at: new Date().toISOString() })
+      .in("contato_telefone", telefones)
+      .neq("campanha_id", campanhaId)
+      .neq("status", "concluido");
+
+    if (contactId) {
+      await sb.from("contacts").update({ assigned_to: "ia" }).eq("id", contactId);
+    }
+
+    const { data: antigos } = await sb
+      .from("contatos_campanha")
+      .select("id")
+      .in("telefone", telefones)
+      .neq("id", contatoId)
+      .neq("status", "comprou");
+    const idsAntigos = (antigos || []).map((a: any) => a.id);
+    if (idsAntigos.length) {
+      await sb
+        .from("retornos_agendados")
+        .update({ status: "cancelado", motivo: "ultima_oportunidade" })
+        .in("contato_campanha_id", idsAntigos)
+        .eq("status", "agendado");
+      await sb
+        .from("contatos_campanha")
+        .update({ resgate_enviado_em: new Date().toISOString() })
+        .in("id", idsAntigos)
+        .is("resgate_enviado_em", null);
+    }
+    console.log(`[Dispatcher] Ultima oportunidade: historico antigo isolado para ${tel}`);
+  } catch (e) {
+    console.warn("[Dispatcher] Falha ao preparar ultima oportunidade:", e);
+  }
+}
+
 async function somarEnviada(sb: any, campanhaId: string) {
   const { data: c } = await sb.from("campanhas").select("total_sent").eq("id", campanhaId).single();
   if (c) await sb.from("campanhas").update({ total_sent: (c.total_sent || 0) + 1 }).eq("id", campanhaId);
@@ -271,12 +319,13 @@ serve(async (req: Request) => {
 
     const { data: contato } = await sb
       .from("contatos_campanha")
-      .select("id, nome, status, curso, abertura_status, primeiro_envio_em, campanhas(tipo_atendimento)")
+      .select("id, nome, status, curso, abertura_status, primeiro_envio_em, campanhas(*)")
       .eq("id", contatoId)
       .single();
     const telefone = blocos[0].telefone;
     const telNorm = normalizePhone(telefone);
     const tipo = (contato as any)?.campanhas?.tipo_atendimento || "visita_externa";
+    const ultimaOportunidade = tipo === "venda_material" && (contato as any)?.campanhas?.modalidade_venda === "ultima_oportunidade";
     const continuacao = contato?.abertura_status === "liberada";
     const temBloco1 = blocos.some((b: any) => b.ordem_bloco === 1);
     const primeiroContato = !continuacao && temBloco1 && !contato?.primeiro_envio_em;
@@ -337,6 +386,7 @@ serve(async (req: Request) => {
         primeiro_envio_em: agora,
       }).eq("id", contatoId);
       const contactId = await obterContactId(sb, telefone, contato?.nome);
+      if (ultimaOportunidade) await prepararUltimaOportunidade(sb, contatoId, blocos[0].campanha_id, telefone, contactId);
       if (contactId) {
         await sb.from("messages").insert({ contact_id: contactId, direction: "out", content: texto, sent_by: "ia", delivered: true, seq: 0 });
       }
@@ -384,6 +434,9 @@ serve(async (req: Request) => {
         });
       }
       if (job.ordem_bloco === 1 && !continuacao) {
+        if (ultimaOportunidade && primeiroContato) {
+          await prepararUltimaOportunidade(sb, job.contato_id, job.campanha_id, job.telefone, contactId);
+        }
         await sb.from("contatos_campanha").update({
           status: "saudacao_enviada",
           primeiro_envio_em: contato?.primeiro_envio_em || new Date().toISOString(),
