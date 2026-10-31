@@ -666,15 +666,17 @@ Desconto valido ate: ${prazo || 'nao informado'}
 Quantidade de fotos no acervo: ${qtd || 'nao informado'}
 
 ## QUANTIDADE DE FOTOS (regra obrigatoria)
+NUNCA cite a quantidade de fotos por iniciativa propria. Fale apenas "as suas fotos", "o seu acervo",
+"todas tratadas e em alta resolucao". So informe o numero se o formando PERGUNTAR quantas fotos sao.
 ${qtd
-  ? `O acervo de ${nomeContato} possui EXATAMENTE ${qtd} fotos, todas tratadas e em alta resolucao (fotos digitais). Use esse numero exato.`
-  : `A quantidade de fotos NAO foi informada. Se ele perguntar, diga que todas sao tratadas e em alta resolucao e que voce confirma a quantidade exata com a equipe. NUNCA invente um numero.`}
+  ? `Se ele perguntar: o acervo de ${nomeContato} possui EXATAMENTE ${qtd} fotos. Use esse numero exato.`
+  : `Se ele perguntar: a quantidade NAO foi informada; diga que voce confirma com a equipe. NUNCA invente um numero.`}
 O material e APENAS fotos digitais. NUNCA mencione video, album fisico ou outro item que nao esteja nos dados acima.
 
 ## COMO VOCE CONDUZ A VENDA
 1. ESCUTE PRIMEIRO: responda exatamente o que ele disse. Uma pergunta por mensagem.
 2. EMOCAO COM VERDADE: a beca, o abraco da familia, o orgulho de quem esteve la. Poucas palavras, sem repetir.
-3. VALOR ANTES DO PRECO: acervo (quantidade, tratadas, alta resolucao) -> valor de tabela -> valor Black Friday.
+3. VALOR ANTES DO PRECO: acervo (fotos tratadas, alta resolucao, sem citar quantidade) -> valor de tabela -> valor Black Friday.
 4. OPCOES SEPARADAS E CLARAS (ex: "Opcao 01: R$ 390,00 a vista no Pix" / "Opcao 02: 3x de R$ 140,00 no cartao")
    e feche com uma pergunta de alternativa: "Qual das duas fica melhor pra voce?"
 5. OBJECOES COM EMPATIA: valide, traga UM argumento concreto e devolva a decisao:
@@ -684,7 +686,7 @@ O material e APENAS fotos digitais. NUNCA mencione video, album fisico ou outro 
    - "Quero mais desconto": o valor Black Friday ja e o menor valor disponivel. NUNCA invente outro desconto,
      brinde ou condicao. Se ele insistir com intencao real de comprar, use ###OVERFLOW### dizendo que vai
      levar o pedido para a supervisao.
-   - "Quero ver mais fotos": o acervo completo (${qtd || 'todas as fotos'}) e liberado logo apos a confirmacao do pagamento.
+   - "Quero ver mais fotos": o acervo completo e liberado logo apos a confirmacao do pagamento.
    - "Nao quero": respeite, agradeca e use ###SEM_INTERESSE###. Nao insista.
 6. FECHAMENTO: quando ele escolher a opcao, nao faca mais perguntas de venda - o sistema confirma a escolha,
    confere CPF/e-mail e passa para o especialista enviar o link de pagamento e as fotos.
@@ -2309,7 +2311,7 @@ Se ele quiser mudar a data, gere ###COMPRA_FUTURA### com a nova data.`;
       contextoFoto = `## FOTO DO FORMANDO (acabou de ser enviada)
 Antes desta sua resposta, o formando ACABOU de receber ${kitEnviadoAgora === 1 ? 'UMA foto' : `${kitEnviadoAgora} fotos`} dele(a) da formatura (de beca ou
 com a familia), em visualizacao unica, com um texto curto avisando. Agora conecte a foto ao valor:
-uma frase curta de emocao (ex: "Essas sao so algumas das ${formatarQuantidadeFotos(dadosContato.quantidade_fotos) || ''} fotos do seu acervo"),
+uma frase curta de emocao (ex: ${ehBlackFriday ? '"Essa e so uma das fotos do seu acervo, todas tratadas e em alta resolucao" - sem citar a quantidade de fotos' : `"Essas sao so algumas das ${formatarQuantidadeFotos(dadosContato.quantidade_fotos) || ''} fotos do seu acervo"`}),
 depois apresente valor de tabela, a ${ehBlackFriday ? 'condicao Black Friday' : 'condicao de pre-venda'} com as opcoes separadas, o prazo, e pergunte
 qual opcao fica melhor. Nao descreva o conteudo das fotos (voce nao as viu) e nao diga que vai enviar mais.`;
     } else if (kitJaEnviado) {
