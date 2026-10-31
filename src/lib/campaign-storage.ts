@@ -33,7 +33,10 @@ export interface Campanha {
   criado_em: string;
   contatos: ContatoCampanha[];
   tipo_atendimento?: 'visita_externa' | 'escritorio' | 'venda_material';
-  modalidade_venda?: 'padrao' | 'ultima_oportunidade';
+  modalidade_venda?: 'padrao' | 'ultima_oportunidade' | 'black_friday';
+  // Resumo vindo do banco (lista de campanhas carrega so os numeros, nao os contatos)
+  total_contatos?: number;
+  erros_envio?: number;
   opcoes_agendamento?: Array<{ data: string; turnos: string[]; horarios?: string[] }>;
 }
 
@@ -68,24 +71,34 @@ export async function fetchCampanhas(): Promise<{ data: Campanha[]; source: 'sup
       return { data: getLocalCampanhas(), source: 'local' };
     }
 
-    // Try to fetch contacts for each campaign from Supabase
-    const campanhasWithContatos: Campanha[] = [];
-    for (const camp of data || []) {
-      const { data: contatosData } = await supabase
-        .from('contatos_campanha')
-        .select('id, nome, telefone, status')
-        .eq('campanha_id', camp.id);
-
-      campanhasWithContatos.push({
-        ...camp,
-        contatos: contatosData?.map((c: any) => ({
-          id: c.id,
-          nome: c.nome,
-          telefone: c.telefone,
-          status: c.status || 'aguardando_inicio',
-        })) || [],
-      });
+    // ANTES: uma consulta por campanha, uma depois da outra, trazendo TODOS os contatos
+    // (com dezenas de campanhas e milhares de contatos a tela demorava muito para abrir).
+    // AGORA: uma unica consulta ao banco devolve so os numeros (total e erros de envio).
+    // Os contatos em si so sao buscados quando a campanha e iniciada/reiniciada.
+    const resumo = new Map<string, { total: number; erros: number }>();
+    const { data: resumoData, error: resumoError } = await supabase.rpc('resumo_campanhas');
+    if (!resumoError) {
+      (resumoData || []).forEach((r: any) => resumo.set(r.campanha_id, { total: Number(r.total) || 0, erros: Number(r.erros_envio) || 0 }));
+    } else {
+      // Funcao ainda nao criada no banco: busca em paralelo (bem mais rapido que em sequencia)
+      console.warn('[Storage] resumo_campanhas indisponivel, usando contagem paralela:', resumoError.message);
+      await Promise.all(
+        (data || []).map(async (camp: any) => {
+          const [{ count: total }, { count: erros }] = await Promise.all([
+            supabase.from('contatos_campanha').select('id', { count: 'exact', head: true }).eq('campanha_id', camp.id),
+            supabase.from('contatos_campanha').select('id', { count: 'exact', head: true }).eq('campanha_id', camp.id).eq('status', 'erro_envio'),
+          ]);
+          resumo.set(camp.id, { total: total || 0, erros: erros || 0 });
+        })
+      );
     }
+
+    const campanhasWithContatos: Campanha[] = (data || []).map((camp: any) => ({
+      ...camp,
+      contatos: [],
+      total_contatos: resumo.get(camp.id)?.total || 0,
+      erros_envio: resumo.get(camp.id)?.erros || 0,
+    }));
 
     console.log('[Storage] Campanhas loaded from Supabase:', campanhasWithContatos.length);
     return { data: campanhasWithContatos, source: 'supabase' };
@@ -268,32 +281,35 @@ export async function createCampanha(
 export async function fetchContatosByCampanha(
   campanhaId: string
 ): Promise<{ data: ContatoCampanha[]; source: 'supabase' | 'local' }> {
-  // First try to get from localStorage (most reliable)
-  const localCampanhas = getLocalCampanhas();
-  const localCampanha = localCampanhas.find((c) => c.id === campanhaId);
-
-  if (localCampanha && localCampanha.contatos && localCampanha.contatos.length > 0) {
-    console.log('[Storage] Contatos loaded from localStorage:', localCampanha.contatos.length);
-    return { data: localCampanha.contatos, source: 'local' };
-  }
-
-  // Try Supabase as fallback
+  // Banco primeiro: o status precisa ser o atual (o localStorage guarda o status do momento
+  // em que a campanha foi criada). Busca em paginas de 1000 (limite do Supabase).
   try {
-    const { data, error } = await supabase
-      .from('contatos_campanha')
-      .select('id, nome, telefone, status, local, curso, numero_contrato')
-      .eq('campanha_id', campanhaId);
-
-    if (error) {
-      throw error;
+    const todos: ContatoCampanha[] = [];
+    for (let inicio = 0; inicio < 50000; inicio += 1000) {
+      const { data, error } = await supabase
+        .from('contatos_campanha')
+        .select('id, nome, telefone, status, local, curso, numero_contrato')
+        .eq('campanha_id', campanhaId)
+        .order('id', { ascending: true })
+        .range(inicio, inicio + 999);
+      if (error) throw error;
+      todos.push(...((data || []) as ContatoCampanha[]));
+      if (!data || data.length < 1000) break;
     }
-
-    if (data && data.length > 0) {
-      console.log('[Storage] Contatos loaded from Supabase:', data.length);
-      return { data: data as ContatoCampanha[], source: 'supabase' };
+    if (todos.length > 0) {
+      console.log('[Storage] Contatos loaded from Supabase:', todos.length);
+      return { data: todos, source: 'supabase' };
     }
   } catch (err) {
     console.warn('[Storage] Supabase failed for contacts:', err);
+  }
+
+  // Sem banco: usa a copia local
+  const localCampanhas = getLocalCampanhas();
+  const localCampanha = localCampanhas.find((c) => c.id === campanhaId);
+  if (localCampanha && localCampanha.contatos && localCampanha.contatos.length > 0) {
+    console.log('[Storage] Contatos loaded from localStorage:', localCampanha.contatos.length);
+    return { data: localCampanha.contatos, source: 'local' };
   }
 
   // Return empty if nothing found

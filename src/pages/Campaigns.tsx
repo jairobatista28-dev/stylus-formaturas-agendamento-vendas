@@ -36,6 +36,7 @@ import * as XLSX from 'xlsx';
 import { CampaignReportModal } from '../components/CampaignReportModal';
 import { EnvioSeguroPanel } from '../components/EnvioSeguroPanel';
 import { MENSAGEM_ULTIMA_OPORTUNIDADE, PROMPT_ULTIMA_OPORTUNIDADE } from '../lib/modelos-ultima-oportunidade';
+import { MENSAGEM_BLACK_FRIDAY, PROMPT_BLACK_FRIDAY } from '../lib/modelos-black-friday';
 
 const TURNOS_HORARIOS: Record<string, string> = {
   'Manha (8h as 12h)': 'Manha entre 08:00 e 12:00',
@@ -50,7 +51,8 @@ const ESCRITORIO_ENDERECO = 'Escritorio - Rua Judith Motta, Parque 10 de Novembr
 
 // 'venda_ultima' e so do formulario: salva como tipo_atendimento = 'venda_material'
 // + modalidade_venda = 'ultima_oportunidade' (venda sem visita, valores de pre-venda)
-type TipoAtendimento = 'visita_externa' | 'escritorio' | 'venda_material' | 'venda_ultima';
+// 'venda_black_friday' idem, com modalidade_venda = 'black_friday' (desconto unico ate a data da Black)
+type TipoAtendimento = 'visita_externa' | 'escritorio' | 'venda_material' | 'venda_ultima' | 'venda_black_friday';
 
 // CPF vindo do Excel pode perder zeros a esquerda (vira numero) - repoe ate 11 digitos
 function normalizarCpfPlanilha(valor: unknown): string | undefined {
@@ -105,6 +107,18 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }
 
 const DELETE_PASSWORD = '3673';
 
+/** Busca todas as linhas de uma consulta em paginas de 1000 (limite do Supabase) */
+async function buscarTodasPaginas<T>(consulta: (de: number, ate: number) => PromiseLike<{ data: any; error: any }>): Promise<T[]> {
+  const todas: T[] = [];
+  for (let inicio = 0; inicio < 50000; inicio += 1000) {
+    const { data, error } = await consulta(inicio, inicio + 999);
+    if (error) throw error;
+    todas.push(...((data || []) as T[]));
+    if (!data || data.length < 1000) break;
+  }
+  return todas;
+}
+
 export function Campaigns() {
   const navigate = useNavigate();
   const [campanhas, setCampanhas] = useState<Campanha[]>([]);
@@ -142,7 +156,7 @@ export function Campaigns() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { toasts, showToast, removeToast } = useToast();
-  const ehVenda = tipoAtendimento === 'venda_material' || tipoAtendimento === 'venda_ultima';
+  const ehVenda = tipoAtendimento === 'venda_material' || tipoAtendimento === 'venda_ultima' || tipoAtendimento === 'venda_black_friday';
 
   useEffect(() => {
     loadCampanhas();
@@ -232,10 +246,10 @@ export function Campaigns() {
       }
 
       // 1. Busca contatos existentes na tabela contatos_campanha para esta campanha
-      const { data: contatosExistentes } = await supabase
-        .from('contatos_campanha')
-        .select('id, telefone')
-        .eq('campanha_id', campanha.id);
+      // (paginado: o Supabase devolve no maximo 1000 linhas por consulta)
+      const contatosExistentes = await buscarTodasPaginas<{ id: string; telefone: string }>((de, ate) =>
+        supabase.from('contatos_campanha').select('id, telefone').eq('campanha_id', campanha.id).order('id').range(de, ate)
+      );
 
       const TelefonesExistentes = new Set((contatosExistentes || []).map((c) => c.telefone));
 
@@ -273,11 +287,21 @@ export function Campaigns() {
       }
 
       // 3. Busca todos os contatos da campanha (com UUIDs reais)
-      const { data: contatosComUUID, error: fetchError } = await supabase
-        .from('contatos_campanha')
-        .select('id, telefone, nome, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos')
-        .eq('campanha_id', campanha.id)
-        .eq('status', 'aguardando_inicio');
+      let fetchError: any = null;
+      let contatosComUUID: any[] = [];
+      try {
+        contatosComUUID = await buscarTodasPaginas<any>((de, ate) =>
+          supabase
+            .from('contatos_campanha')
+            .select('id, telefone, nome, numero_contrato, valor_tabela, valor_oferecido, formas_pagamento, opcoes_plano, prazo_reciclagem, quantidade_fotos')
+            .eq('campanha_id', campanha.id)
+            .eq('status', 'aguardando_inicio')
+            .order('id')
+            .range(de, ate)
+        );
+      } catch (e) {
+        fetchError = e;
+      }
 
       if (fetchError || !contatosComUUID || contatosComUUID.length === 0) {
         showToast('Nenhum contato disponivel para envio', 'error');
@@ -320,6 +344,7 @@ export function Campaigns() {
             .replace(/\{opcoes_plano\}/gi, contato.opcoes_plano || 'consulte as opcoes disponiveis')
             .replace(/\{prazo_reciclagem\}/gi, contato.prazo_reciclagem || 'em breve')
             .replace(/\{prazo_pre_venda\}/gi, contato.prazo_reciclagem || 'em breve')
+            .replace(/\{prazo_black_friday\}/gi, contato.prazo_reciclagem || 'em breve')
             .replace(/\{prazo_final\}/gi, contato.prazo_reciclagem || 'em breve')
             .replace(/\{quantidade_fotos\}/gi, (contato as any).quantidade_fotos || 'nao informado');
         }
@@ -478,7 +503,7 @@ export function Campaigns() {
     const contratoIdx = headers.findIndex((h) => h.includes('contrato') || h.includes('numero_contrato') || h.includes('numero contrato'));
     const dataIdx = headers.findIndex((h) => h === 'data' || h.includes('data '));
     const valorTabelaIdx = headers.findIndex((h) => h.includes('valor_tabela') || h.includes('valor tabela'));
-    const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido') || (h.includes('valor') && (h.includes('pre_venda') || h.includes('pre venda') || h.includes('pre-venda') || h.includes('prevenda'))));
+    const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido') || (h.includes('valor') && (h.includes('pre_venda') || h.includes('pre venda') || h.includes('pre-venda') || h.includes('prevenda') || h.includes('black'))));
     const formasPagamentoIdx = headers.findIndex((h) => h.includes('formas_pagamento') || h.includes('formas de pagamento') || h.includes('pagamento'));
     const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
     const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem') || h.includes('prazo'));
@@ -570,7 +595,7 @@ export function Campaigns() {
       const contratoIdx = headers.findIndex((h) => h.includes('contrato') || h.includes('numero_contrato'));
       const dataIdx = headers.findIndex((h) => h === 'data' || h.includes('data '));
       const valorTabelaIdx = headers.findIndex((h) => h.includes('valor_tabela') || h.includes('valor tabela'));
-      const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido') || (h.includes('valor') && (h.includes('pre_venda') || h.includes('pre venda') || h.includes('pre-venda') || h.includes('prevenda'))));
+      const valorOferecidoIdx = headers.findIndex((h) => h.includes('valor_oferecido') || h.includes('valor oferecido') || (h.includes('valor') && (h.includes('pre_venda') || h.includes('pre venda') || h.includes('pre-venda') || h.includes('prevenda') || h.includes('black'))));
       const formasPagamentoIdx = headers.findIndex((h) => h.includes('formas_pagamento') || h.includes('formas de pagamento') || h.includes('pagamento'));
       const opcoesPlanoIdx = headers.findIndex((h) => h.includes('opcoes_plano') || h.includes('opcoes de plano') || h.includes('plano'));
       const prazoReciclagemIdx = headers.findIndex((h) => h.includes('prazo_reciclagem') || h.includes('prazo de reciclagem') || h.includes('reciclagem') || h.includes('prazo'));
@@ -681,7 +706,7 @@ export function Campaigns() {
     // de conhecimento). Se as datas usadas forem todas do mesmo tipo,
     // mantem esse tipo; se misturar visita externa e escritorio na mesma
     // campanha, marca como "mista".
-    let tipoParaSalvar: string = tipoAtendimento === 'venda_ultima' ? 'venda_material' : tipoAtendimento;
+    let tipoParaSalvar: string = tipoAtendimento === 'venda_ultima' || tipoAtendimento === 'venda_black_friday' ? 'venda_material' : tipoAtendimento;
     if (!ehVenda) {
       const tiposUsados = new Set(opcoesJson.map((o) => o.tipo));
       tipoParaSalvar = tiposUsados.size > 1 ? 'mista' : (opcoesJson[0]?.tipo || tipoAtendimento);
@@ -695,6 +720,7 @@ export function Campaigns() {
         prompt_ia: formData.prompt_ia.trim() || null,
         tipo_atendimento: tipoParaSalvar,
         ...(tipoAtendimento === 'venda_ultima' ? { modalidade_venda: 'ultima_oportunidade' } : {}),
+        ...(tipoAtendimento === 'venda_black_friday' ? { modalidade_venda: 'black_friday' } : {}),
         opcoes_agendamento: !ehVenda && opcoesJson.length > 0 ? opcoesJson : undefined,
       } as any,
       uploadedContacts
@@ -803,6 +829,15 @@ export function Campaigns() {
                         Última oportunidade
                       </span>
                     )}
+                    {campanha.modalidade_venda === 'black_friday' && (
+                      <span
+                        className="px-2 py-1 rounded text-xs font-medium flex items-center gap-1"
+                        style={{ color: '#f8fafc', backgroundColor: '#111827', border: '1px solid #f59e0b' }}
+                      >
+                        <Sparkles size={12} style={{ color: '#f59e0b' }} />
+                        Black Friday
+                      </span>
+                    )}
                   </div>
                   {campanha.descricao && (
                     <p className="text-sm mb-2" style={{ color: 'var(--text-muted)' }}>
@@ -811,10 +846,10 @@ export function Campaigns() {
                   )}
                   <div className="flex items-center gap-4 text-xs" style={{ color: 'var(--text-muted)' }}>
                     <span>Criada em {new Date(campanha.criado_em).toLocaleDateString('pt-BR')}</span>
-                    {campanha.contatos && campanha.contatos.length > 0 && (
+                    {(campanha.total_contatos ?? campanha.contatos?.length ?? 0) > 0 && (
                       <span className="flex items-center gap-1">
                         <CheckCircle size={12} style={{ color: 'var(--success)' }} />
-                        {campanha.contatos.length} contatos
+                        {campanha.total_contatos ?? campanha.contatos.length} contatos
                       </span>
                     )}
                   </div>
@@ -831,7 +866,7 @@ export function Campaigns() {
                     </button>
                   ) : campanha.status === 'em_andamento' ? (
                     <>
-                      {campanha.contatos?.some((c) => c.status === 'erro_envio') && (
+                      {((campanha.erros_envio ?? 0) > 0 || campanha.contatos?.some((c) => c.status === 'erro_envio')) && (
                         <button
                           onClick={() => handleStartCampanha(campanha, true)}
                           className="btn-primary flex-1 justify-center"
@@ -1019,6 +1054,20 @@ export function Campaigns() {
                       />
                       <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Venda - Ultima Oportunidade (pre-venda)</span>
                     </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="tipoAtendimento"
+                        value="venda_black_friday"
+                        checked={tipoAtendimento === 'venda_black_friday'}
+                        onChange={() => {
+                          setTipoAtendimento('venda_black_friday');
+                          setOpcoesAgendamento([]);
+                        }}
+                        className="w-4 h-4"
+                      />
+                      <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Venda - Black Friday</span>
+                    </label>
                   </div>
                 </div>
 
@@ -1027,7 +1076,7 @@ export function Campaigns() {
                     <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
                       Para formandos que <strong>agendaram e nao compraram</strong> ou que <strong>nunca agendaram</strong>.
                       A IA vende tudo pelo WhatsApp, <strong>sem visita</strong>, mantendo o valor de pre-venda como ultima
-                      oportunidade. Na primeira resposta do formando ela envia <strong>3 fotos dele (beca/familia) em
+                      oportunidade. Na primeira resposta do formando ela envia <strong>1 foto dele (beca ou com a familia) em
                       visualizacao unica</strong>, apresenta os valores e, quando ele escolher a opcao, confere CPF/e-mail e
                       passa para o atendimento humano (link de pagamento + envio das fotos). A IA nunca fala de reciclagem
                       nem de perda das fotos e ignora conversas antigas de agendamento.
@@ -1055,6 +1104,46 @@ export function Campaigns() {
                           prompt_ia: PROMPT_ULTIMA_OPORTUNIDADE,
                         }));
                         showToast('Mensagem e prompt da Ultima Oportunidade carregados', 'success');
+                      }}
+                    >
+                      <Sparkles size={14} />
+                      Usar modelo pronto (mensagem + prompt)
+                    </button>
+                  </div>
+                )}
+
+                {tipoAtendimento === 'venda_black_friday' && (
+                  <div className="space-y-2 p-3 rounded-lg" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid #f59e0b' }}>
+                    <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                      Campanha de <strong>Black Friday</strong>: venda 100% pelo WhatsApp, <strong>sem visita</strong>, com
+                      valores bem abaixo da tabela e <strong>desconto unico valido ate a data da Black</strong>. Na primeira
+                      resposta do formando a IA envia <strong>1 foto dele (beca ou com a familia) em visualizacao unica</strong>,
+                      apresenta tabela x valor Black Friday e, quando ele escolher a opcao, confere CPF/e-mail e passa para o
+                      atendimento humano (link de pagamento + envio das fotos). Nunca fala de reciclagem/perda das fotos.
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                      Colunas da planilha: <strong>nome</strong>, <strong>telefone</strong>, <strong>numero_contrato</strong>,{' '}
+                      <strong>valor_tabela</strong>, <strong>valor_oferecido</strong> (valor Black Friday),{' '}
+                      <strong>formas_pagamento</strong>, <strong>opcoes_plano</strong> (opcional),{' '}
+                      <strong>prazo_black_friday</strong> (data final do desconto), <strong>quantidade_fotos</strong>,{' '}
+                      <strong>email</strong> e <strong>cpf</strong>.
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--info)' }}>
+                      Variaveis: {`{primeiro_nome}`}, {`{quantidade_fotos}`}, {`{valor_tabela}`}, {`{valor_oferecido}`},{' '}
+                      {`{formas_pagamento}`}, {`{prazo_black_friday}`}. Com a "abertura em dois passos" ligada (Envio seguro),
+                      apague a primeira linha (cumprimento) de cada variacao.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      style={{ padding: '6px 12px', fontSize: '12px' }}
+                      onClick={() => {
+                        setFormData((f) => ({
+                          ...f,
+                          mensagem_inicial: MENSAGEM_BLACK_FRIDAY,
+                          prompt_ia: PROMPT_BLACK_FRIDAY,
+                        }));
+                        showToast('Mensagem e prompt da Black Friday carregados', 'success');
                       }}
                     >
                       <Sparkles size={14} />

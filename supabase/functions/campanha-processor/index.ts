@@ -152,6 +152,7 @@ function substituirVariaveis(
     resultado = resultado.replace(/\{opcoes_plano\}/gi, dadosVenda?.opcoes_plano || 'consulte as opcoes disponiveis');
     resultado = resultado.replace(/\{prazo_reciclagem\}/gi, dadosVenda?.prazo_reciclagem || 'em breve');
     resultado = resultado.replace(/\{prazo_pre_venda\}/gi, dadosVenda?.prazo_reciclagem || 'em breve');
+    resultado = resultado.replace(/\{prazo_black_friday\}/gi, dadosVenda?.prazo_reciclagem || 'em breve');
     resultado = resultado.replace(/\{prazo_final\}/gi, dadosVenda?.prazo_reciclagem || 'em breve');
     resultado = resultado.replace(/\{quantidade_fotos\}/gi, dadosVenda?.quantidade_fotos || 'nao informado');
   }
@@ -446,8 +447,13 @@ function montarPerguntaEscolha(nome: string, dados: any): string {
 }
 
 /** Mensagem final: dados confirmados, atendimento repassado ao especialista humano */
-function montarMensagemRepasseHumano(nome: string, plano: string | null | undefined, forma: string | null | undefined, dadosAtualizados: boolean, ultimaOportunidade = false): string {
+function montarMensagemRepasseHumano(nome: string, plano: string | null | undefined, forma: string | null | undefined, dadosAtualizados: boolean, ultimaOportunidade = false, blackFriday = false): string {
   const pn = primeiroNome(nome);
+  if (blackFriday) {
+    return `Tudo certo${pn ? ', ' + pn : ''}! \u2705 ${dadosAtualizados ? 'Atualizei e confirmei seus dados.' : 'Seus dados estão confirmados.'}\n\n` +
+      `Sua condição Black Friday está garantida${(String(plano || '').trim() || String(forma || '').trim()) ? ` (${descreverPlano(plano, forma)})` : ''}. Agora vou passar seu atendimento para um especialista da nossa equipe: ele te envia o link de pagamento em até ${PRAZO_LINK_PAGAMENTO} e, assim que o pagamento for confirmado, cuida do envio das suas fotos.\n\n` +
+      `Foi um prazer te atender! \u{1F4F8}`;
+  }
   if (ultimaOportunidade) {
     return `Tudo certo${pn ? ', ' + pn : ''}! \u2705 ${dadosAtualizados ? 'Atualizei e confirmei seus dados.' : 'Seus dados estão confirmados.'}\n\n` +
       `Sua condição de pré-venda está garantida${(String(plano || '').trim() || String(forma || '').trim()) ? ` (${descreverPlano(plano, forma)})` : ''}. Agora vou passar seu atendimento para um especialista da nossa equipe: ele te envia o link de pagamento em até ${PRAZO_LINK_PAGAMENTO} e, assim que o pagamento for confirmado, cuida do envio das suas fotos.\n\n` +
@@ -607,6 +613,106 @@ Voce JA esta em atendimento com ele (a mensagem de abertura desta campanha ja fo
 reapresente e NUNCA pergunte "em que posso te ajudar?" no meio da conversa. Mensagem curta ("sim", "ok"):
 interprete pelo que VOCE perguntou na mensagem anterior - mas "sim" sozinho nunca e escolha de opcao
 quando existem duas ou mais. Use sempre o nome real (${nomeContato}), nunca [Nome] ou {nome}.
+
+${contextoExtra}
+
+## INSTRUCAO FINAL
+Se a pergunta nao estiver coberta pelos dados acima ou pela base de conhecimento, diga que vai confirmar
+com a equipe e NUNCA invente a resposta.`;
+}
+
+/** Prompt de sistema da campanha BLACK FRIDAY (venda direta, sem visita, desconto unico ate a data da Black) */
+function montarPromptBlackFriday(nomeContato: string, dadosVenda: DadosVenda | undefined, contextoExtra: string): string {
+  const qtd = formatarQuantidadeFotos(dadosVenda?.quantidade_fotos);
+  const prazo = dadosVenda?.prazo_reciclagem || '';
+  const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Manaus' });
+  return `
+
+## IDENTIDADE
+Voce e a Sophia, consultora senior de material fotografico da Stylus Formaturas. Voce vende com
+seguranca, carinho e argumentos reais: o formando sente que esta recebendo uma oportunidade de verdade,
+nunca pressao. Esta falando com ${nomeContato}.
+
+## O MOMENTO DESTA CONVERSA (regra prioritaria)
+Esta e a campanha de BLACK FRIDAY da Stylus: venda DIRETA pelo WhatsApp, SEM VISITA e sem representante,
+com valores muito abaixo da tabela e um desconto UNICO, valido somente ate ${prazo || 'a data final da Black Friday'}.
+Conversas antigas (agendamento de visita, pre-venda, outras campanhas) ficaram no passado:
+- NUNCA ofereca visita, NUNCA fale em agendar, NUNCA pergunte data, turno, horario ou endereco.
+- NUNCA confirme, remarque ou comente agendamentos antigos. Se ele falar disso, acolha em UMA frase
+  (ex: "Entendo! E justamente por isso te chamei: na Black Friday da pra resolver tudo por aqui.") e siga.
+- Se ele pedir atendimento presencial, explique com gentileza que a condicao Black Friday e toda por aqui,
+  e que o pagamento e finalizado por link com um especialista.
+
+## O QUE NUNCA FALAR (regra absoluta)
+NUNCA mencione reciclagem, descarte, destruicao, exclusao, apagar, perder ou sumir com as fotos, prazo de
+guarda, prorrogacao ou qualquer ameaca sobre o destino do material. Se alguma base de conhecimento falar
+disso, IGNORE. Se ele perguntar "e se eu nao comprar agora?", responda apenas que o desconto de Black Friday
+vale ate ${prazo || 'a data informada'} e que depois disso o valor volta ao normal - sem falar em perda das fotos.
+
+## A URGENCIA E O DESCONTO
+O argumento real: e o MENOR VALOR que a Stylus ja ofereceu para esse material, um desconto UNICO de Black
+Friday, valido ate ${prazo || 'a data informada'}. Mostre a diferenca entre o valor de tabela e o valor Black Friday
+(quanto ele economiza) para o desconto ter peso real. Cite a data ao apresentar as condicoes e, no maximo,
+mais uma vez se ele hesitar. Sem caixa alta, sem "ULTIMA CHANCE!!!", sem drama.
+
+## DADOS DESTE CONTRATO (use exatamente estes valores, nunca invente outros)
+Nome: ${nomeContato}
+Numero do contrato: ${dadosVenda?.numero_contrato || 'Nao informado'}
+Valor de tabela (cheio): ${valorOuPadrao(dadosVenda?.valor_tabela)}
+Valor BLACK FRIDAY (condicao unica): ${valorOuPadrao(dadosVenda?.valor_oferecido)}
+Formas de pagamento: ${dadosVenda?.formas_pagamento || 'consulte as opcoes disponiveis'}
+Opcoes de plano/parcelamento: ${dadosVenda?.opcoes_plano || 'as mesmas do valor Black Friday'}
+Desconto valido ate: ${prazo || 'nao informado'}
+Quantidade de fotos no acervo: ${qtd || 'nao informado'}
+
+## QUANTIDADE DE FOTOS (regra obrigatoria)
+${qtd
+  ? `O acervo de ${nomeContato} possui EXATAMENTE ${qtd} fotos, todas tratadas e em alta resolucao (fotos digitais). Use esse numero exato.`
+  : `A quantidade de fotos NAO foi informada. Se ele perguntar, diga que todas sao tratadas e em alta resolucao e que voce confirma a quantidade exata com a equipe. NUNCA invente um numero.`}
+O material e APENAS fotos digitais. NUNCA mencione video, album fisico ou outro item que nao esteja nos dados acima.
+
+## COMO VOCE CONDUZ A VENDA
+1. ESCUTE PRIMEIRO: responda exatamente o que ele disse. Uma pergunta por mensagem.
+2. EMOCAO COM VERDADE: a beca, o abraco da familia, o orgulho de quem esteve la. Poucas palavras, sem repetir.
+3. VALOR ANTES DO PRECO: acervo (quantidade, tratadas, alta resolucao) -> valor de tabela -> valor Black Friday.
+4. OPCOES SEPARADAS E CLARAS (ex: "Opcao 01: R$ 390,00 a vista no Pix" / "Opcao 02: 3x de R$ 140,00 no cartao")
+   e feche com uma pergunta de alternativa: "Qual das duas fica melhor pra voce?"
+5. OBJECOES COM EMPATIA: valide, traga UM argumento concreto e devolva a decisao:
+   - "Esta caro": mostre quanto ele economiza em relacao a tabela e o parcelamento.
+   - "Vou pensar": pergunte com leveza o que ficou pendente e lembre, uma vez, que o desconto vai ate ${prazo || 'a data da Black'}.
+   - "Agora nao tenho dinheiro": parcelamento ou programar a compra para um dia ate ${prazo || 'a data da Black'}.
+   - "Quero mais desconto": o valor Black Friday ja e o menor valor disponivel. NUNCA invente outro desconto,
+     brinde ou condicao. Se ele insistir com intencao real de comprar, use ###OVERFLOW### dizendo que vai
+     levar o pedido para a supervisao.
+   - "Quero ver mais fotos": o acervo completo (${qtd || 'todas as fotos'}) e liberado logo apos a confirmacao do pagamento.
+   - "Nao quero": respeite, agradeca e use ###SEM_INTERESSE###. Nao insista.
+6. FECHAMENTO: quando ele escolher a opcao, nao faca mais perguntas de venda - o sistema confirma a escolha,
+   confere CPF/e-mail e passa para o especialista enviar o link de pagamento e as fotos.
+7. ESTILO: portugues correto, 2 a 4 frases, no maximo 1 emoji por mensagem. NUNCA fale de "sistema",
+   "marcador" ou etapas internas. NUNCA diga que vai enviar link, documento ou fotos.
+
+## CALCULO DE VALORES (critico)
+Cada opcao e um plano INDEPENDENTE, com seu proprio total. Nunca some nem misture numeros de opcoes
+diferentes. Se ele apontar um erro de conta, corrija com educacao usando os valores reais acima.
+
+## REGRA CRITICA - SO REGISTRE A ESCOLHA QUANDO O FORMANDO ESCOLHER
+"oi", "ok", "sim", "pode ser", "quero", "manda", perguntas ou hesitacoes NAO sao escolha. Com mais de uma
+opcao, se ele so disser "sim"/"quero", pergunte QUAL prefere. So quando ele indicar claramente a opcao
+(ex: "a opcao 1", "no pix", "parcelado"), registre:
+###QUER_COMPRAR###{"plano_escolhido":"TEXTO_DO_PLANO","forma_pagamento_escolhida":"TEXTO_DA_FORMA"}###FIM###
+Em "plano_escolhido" coloque APENAS a opcao escolhida. NUNCA escreva "anotei sua escolha" por conta propria.
+Sem interesse: ###SEM_INTERESSE###
+Atendimento humano (pediu uma pessoa, irritacao, reclamacao): ###OVERFLOW###
+
+## COMPRA EM OUTRA DATA (somente ate o fim da Black Friday)
+Se ele quiser comprar mais pra frente, pergunte o DIA. A data precisa ser ate ${prazo || 'o fim da Black Friday'};
+se for depois, explique que o desconto so vale ate ${prazo || 'essa data'} e pergunte se consegue ate la.
+Com uma data concreta dentro do prazo: ###COMPRA_FUTURA###{"data":"YYYY-MM-DD"}###FIM###
+Hoje e ${hoje}. Use o ano correto. Sem data concreta, nao gere o marcador.
+
+## CONTINUIDADE
+A abertura desta campanha ja foi enviada. NUNCA se reapresente e NUNCA pergunte "em que posso te ajudar?".
+Use sempre o nome real (${nomeContato}), nunca [Nome] ou {nome}.
 
 ${contextoExtra}
 
@@ -1104,6 +1210,9 @@ function validarDataHorarioMencionado(
 // Ultimo erro do Gemini (vai para o Painel de Alertas quando a IA nao responde)
 let ultimoErroGemini = '';
 
+/** Campanhas de venda direta (Ultima Oportunidade e Black Friday): quantas fotos de previa enviar */
+const QTD_FOTOS_VENDA_DIRETA = 1;
+
 async function chamarGemini(
   sb: any,
   promptIa: string,
@@ -1146,7 +1255,10 @@ async function chamarGemini(
       systemInstruction += `\n\n## BASE DE CONHECIMENTO DA CAMPANHA (tem prioridade sobre a base geral em caso de conflito):\n${baseConhecimentoCampanha}`;
     }
 
-    if (tipoAtendimento === 'venda_material' && modalidadeVenda === 'ultima_oportunidade') {
+    if (tipoAtendimento === 'venda_material' && modalidadeVenda === 'black_friday') {
+      // ============ VENDA - BLACK FRIDAY (sem visita, desconto unico ate a data da Black) ============
+      systemInstruction += montarPromptBlackFriday(nomeContato, dadosVenda, contextoAgendamento);
+    } else if (tipoAtendimento === 'venda_material' && modalidadeVenda === 'ultima_oportunidade') {
       // ============ VENDA - ULTIMA OPORTUNIDADE (sem visita, valores de pre-venda) ============
       systemInstruction += montarPromptUltimaOportunidade(nomeContato, dadosVenda, contextoAgendamento);
     } else if (tipoAtendimento === 'venda_material') {
@@ -1806,8 +1918,12 @@ case 'resposta_recebida': {
   const dadosContato: any = contatoCampanhaData || {};
 
   // Campanha "Ultima Oportunidade": venda direta, sem visita, sem falar de reciclagem
-  const ehUltimaOportunidade = campanha.tipo_atendimento === 'venda_material' && campanha.modalidade_venda === 'ultima_oportunidade';
-  const modalidadeVenda: string = ehUltimaOportunidade ? 'ultima_oportunidade' : 'padrao';
+  // Black Friday usa o MESMO fluxo de venda direta (sem visita, 1 foto, sem falar de reciclagem),
+  // so muda o prompt e os textos ("condicao Black Friday" em vez de "pre-venda").
+  const ehBlackFriday = campanha.tipo_atendimento === 'venda_material' && campanha.modalidade_venda === 'black_friday';
+  const ehUltimaOportunidade = campanha.tipo_atendimento === 'venda_material' && (campanha.modalidade_venda === 'ultima_oportunidade' || ehBlackFriday);
+  const modalidadeVenda: string = ehBlackFriday ? 'black_friday' : ehUltimaOportunidade ? 'ultima_oportunidade' : 'padrao';
+  const nomeCondicao = ehBlackFriday ? 'condição Black Friday' : 'condição de pré-venda';
 
   // Formando resgatado: o prazo que vale passa a ser o prorrogado
   let contextoProrrogacao = '';
@@ -2082,7 +2198,7 @@ pergunte qual prefere. Nao repita o aviso da prorrogacao inteiro, ele ja recebeu
         dadosContato as DadosVenda,
         dadosContato.plano_escolhido || '',
         dadosContato.forma_pagamento_escolhida || '',
-        { telefone, cpf: cpfAtual, email: emailAtual, rotulo: ehUltimaOportunidade ? `ULTIMA OPORTUNIDADE (pre-venda) - ${campanha.nome || ''}`.trim() : undefined }
+        { telefone, cpf: cpfAtual, email: emailAtual, rotulo: ehBlackFriday ? `BLACK FRIDAY - ${campanha.nome || ''}`.trim() : ehUltimaOportunidade ? `ULTIMA OPORTUNIDADE (pre-venda) - ${campanha.nome || ''}`.trim() : undefined }
       );
 
       await registrarAlerta(sb, {
@@ -2101,7 +2217,7 @@ pergunte qual prefere. Nao repita o aviso da prorrogacao inteiro, ele ja recebeu
       console.log(`[Processor] ${nomeCompleto}: dados conferidos - venda repassada ao especialista`);
 
       return await responderVenda(
-        montarMensagemRepasseHumano(nomeCompleto, dadosContato.plano_escolhido, dadosContato.forma_pagamento_escolhida, atualizou, ehUltimaOportunidade),
+        montarMensagemRepasseHumano(nomeCompleto, dadosContato.plano_escolhido, dadosContato.forma_pagamento_escolhida, atualizou, ehUltimaOportunidade, ehBlackFriday),
         true
       );
     };
@@ -2160,7 +2276,7 @@ Se ele quiser mudar a data, gere ###COMPRA_FUTURA### com a nova data.`;
   let contextoFoto = '';
   const formandoPediuFoto = pediuFoto(texto_resposta);
   if (ehUltimaOportunidade && !emConferencia && dadosContato.id) {
-    // KIT DE 3 FOTOS (beca / familia, visualizacao unica): enviado uma vez, logo na primeira
+    // 1 FOTO (beca ou com a familia, visualizacao unica): enviada uma vez, logo na primeira
     // resposta do formando que nao seja uma recusa. A IA ja responde sabendo se as fotos chegaram.
     const estadoKit = Number(dadosContato.fotos_kit_enviadas || 0); // 0 nunca, -1 enviando, -2 falhou, >0 enviadas
     const kitJaEnviado = estadoKit > 0 || estadoKit === -1;
@@ -2175,10 +2291,10 @@ Se ele quiser mudar a data, gere ###COMPRA_FUTURA### com a nova data.`;
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
           },
-          body: JSON.stringify({ acao: 'enviar_kit', contato_campanha_id: dadosContato.id, quantidade: 3, origem: 'ia' }),
+          body: JSON.stringify({ acao: 'enviar_kit', contato_campanha_id: dadosContato.id, quantidade: QTD_FOTOS_VENDA_DIRETA, origem: 'ia' }),
         });
         const jk = await rk.json().catch(() => ({}));
-        if (jk?.success) kitEnviadoAgora = Number(jk.enviadas) || 3;
+        if (jk?.success) kitEnviadoAgora = Number(jk.enviadas) || QTD_FOTOS_VENDA_DIRETA;
         else if (jk?.motivo === 'fotos_desativadas') kitFalhou = true;
         else if (jk?.motivo !== 'foto_ja_enviada') { kitFalhou = true; alertarKit = true; }
         console.log(`[Processor] Kit de fotos ${nomeCompleto}:`, jk?.success ? `${kitEnviadoAgora} enviadas` : jk?.motivo);
@@ -2190,26 +2306,26 @@ Se ele quiser mudar a data, gere ###COMPRA_FUTURA### com a nova data.`;
     }
     if (kitEnviadoAgora > 0) {
       fotosUltimaOportunidadeEnviadas = true;
-      contextoFoto = `## FOTOS DO FORMANDO (acabaram de ser enviadas)
-Antes desta sua resposta, o formando ACABOU de receber ${kitEnviadoAgora} foto(s) dele(a) da formatura (de beca e/ou
-com a familia), em visualizacao unica, com um texto curto avisando. Agora conecte as fotos ao valor:
+      contextoFoto = `## FOTO DO FORMANDO (acabou de ser enviada)
+Antes desta sua resposta, o formando ACABOU de receber ${kitEnviadoAgora === 1 ? 'UMA foto' : `${kitEnviadoAgora} fotos`} dele(a) da formatura (de beca ou
+com a familia), em visualizacao unica, com um texto curto avisando. Agora conecte a foto ao valor:
 uma frase curta de emocao (ex: "Essas sao so algumas das ${formatarQuantidadeFotos(dadosContato.quantidade_fotos) || ''} fotos do seu acervo"),
-depois apresente valor de tabela, a condicao de pre-venda com as opcoes separadas, o prazo, e pergunte
+depois apresente valor de tabela, a ${ehBlackFriday ? 'condicao Black Friday' : 'condicao de pre-venda'} com as opcoes separadas, o prazo, e pergunte
 qual opcao fica melhor. Nao descreva o conteudo das fotos (voce nao as viu) e nao diga que vai enviar mais.`;
     } else if (kitJaEnviado) {
       contextoFoto = `## FOTOS
-O formando ja recebeu as fotos de previa (beca/familia) nesta conversa. Nao prometa outras fotos. Se ele
+O formando ja recebeu a foto de previa (beca/familia) nesta conversa. Nao prometa outras fotos. Se ele
 pedir mais, diga que o acervo completo e liberado logo apos a confirmacao do pagamento.`;
     } else {
       contextoFoto = `## FOTOS
-${kitFalhou ? 'As fotos de previa nao puderam ser enviadas agora. ' : ''}Nao diga que enviou fotos e nao prometa envio. Se ele pedir
+${kitFalhou ? 'A foto de previa nao pode ser enviada agora. ' : ''}Nao diga que enviou fotos e nao prometa envio. Se ele pedir
 para ver, diga que vai pedir para a equipe separar uma previa e, enquanto isso, conduza para as condicoes.`;
       if (alertarKit) {
         await registrarAlerta(sb, {
           tipo: 'foto_falhou',
           gravidade: 'atencao',
-          titulo: 'Ultima oportunidade: fotos de previa nao enviadas',
-          detalhe: 'O kit de 3 fotos nao foi enviado. Se possivel, envie manualmente pelo painel.',
+          titulo: `${ehBlackFriday ? 'Black Friday' : 'Ultima oportunidade'}: foto de previa nao enviada`,
+          detalhe: 'A foto de previa nao foi enviada. Se possivel, envie manualmente pelo painel.',
           contato_nome: nomeCompleto,
           telefone,
         });
@@ -2314,7 +2430,7 @@ reapresente" nao se aplica.`;
 ## CORRECAO OBRIGATORIA
 Sua resposta anterior falou de reciclagem, descarte, perda das fotos, prazo de guarda ou prorrogacao.
 Isso e PROIBIDO nesta conversa. Responda de novo SEM tocar nesses assuntos: o unico argumento de prazo
-e que a condicao de pre-venda vale ate a data informada.`,
+e que a ${ehBlackFriday ? 'condicao Black Friday' : 'condicao de pre-venda'} vale ate a data informada.`,
       campanha.tipo_atendimento || 'visita_externa',
       dadosContato as DadosVenda,
       modalidadeVenda
@@ -2619,12 +2735,12 @@ disse e, se fizer sentido, pergunte qual das opcoes ele prefere.`;
       };
 
       if (foraDoPrazoPreVenda && prazoPreVenda) {
-        respostaSistema = `Entendo${pn ? ', ' + pn : ''}! Só preciso te avisar com transparência: a condição de pré-venda vale até ${dataCurtaBR(prazoPreVenda)}. Depois dessa data eu não consigo mais garantir esse valor pra você.\n\nConsegue programar até ${dataCurtaBR(prazoPreVenda)}? Me diz o dia que fica melhor.`;
+        respostaSistema = `Entendo${pn ? ', ' + pn : ''}! Só preciso te avisar com transparência: a ${nomeCondicao} vale até ${dataCurtaBR(prazoPreVenda)}. Depois dessa data eu não consigo mais garantir esse valor pra você.\n\nConsegue programar até ${dataCurtaBR(prazoPreVenda)}? Me diz o dia que fica melhor.`;
       } else if (ehUltimaOportunidade && r?.ok) {
         novoStatus = 'compra_futura';
-        respostaSistema = `Combinado${pn ? ', ' + pn : ''}! Anotei aqui: no dia ${fmt(r.data)} eu te chamo por aqui para finalizarmos, com a sua condição de pré-venda garantida até lá. 📸`;
+        respostaSistema = `Combinado${pn ? ', ' + pn : ''}! Anotei aqui: no dia ${fmt(r.data)} eu te chamo por aqui para finalizarmos, com a sua ${nomeCondicao} garantida até lá. 📸`;
       } else if (ehUltimaOportunidade && r?.motivo === 'acima_do_limite') {
-        respostaSistema = `Entendo${pn ? ', ' + pn : ''}! Só preciso te avisar com transparência: a condição de pré-venda tem prazo${dadosContato.prazo_reciclagem ? ` (até ${dadosContato.prazo_reciclagem})` : ''} e depois disso eu não consigo mais garantir esse valor.\n\nQual dia dentro desse prazo fica melhor pra você?`;
+        respostaSistema = `Entendo${pn ? ', ' + pn : ''}! Só preciso te avisar com transparência: a ${nomeCondicao} tem prazo${dadosContato.prazo_reciclagem ? ` (até ${dadosContato.prazo_reciclagem})` : ''} e depois disso eu não consigo mais garantir esse valor.\n\nQual dia dentro desse prazo fica melhor pra você?`;
       } else if (r?.ok) {
         novoStatus = 'compra_futura';
         respostaSistema = r.excecao

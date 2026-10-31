@@ -325,7 +325,8 @@ serve(async (req: Request) => {
     const telefone = blocos[0].telefone;
     const telNorm = normalizePhone(telefone);
     const tipo = (contato as any)?.campanhas?.tipo_atendimento || "visita_externa";
-    const ultimaOportunidade = tipo === "venda_material" && (contato as any)?.campanhas?.modalidade_venda === "ultima_oportunidade";
+    // Venda direta (Ultima Oportunidade ou Black Friday): isola o historico antigo do formando
+    const ultimaOportunidade = tipo === "venda_material" && ["ultima_oportunidade", "black_friday"].includes((contato as any)?.campanhas?.modalidade_venda);
     const continuacao = contato?.abertura_status === "liberada";
     const temBloco1 = blocos.some((b: any) => b.ordem_bloco === 1);
     const primeiroContato = !continuacao && temBloco1 && !contato?.primeiro_envio_em;

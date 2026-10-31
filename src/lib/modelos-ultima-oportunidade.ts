@@ -15,7 +15,7 @@ Consegui liberar pra você a última oportunidade de garantir esse material com 
 
 [esperar 5s]
 
-Posso te mostrar algumas das suas fotos e te passar as condições?
+Posso te mostrar uma das suas fotos e te passar as condições?
 
 ===VARIANTE===
 
@@ -31,7 +31,7 @@ Abri uma condição especial para quem ainda não garantiu as fotos: é a últim
 
 [esperar 5s]
 
-Quer que eu te mostre algumas fotos suas e te passe os valores?`;
+Quer que eu te mostre uma foto sua e te passe os valores?`;
 
 export const PROMPT_ULTIMA_OPORTUNIDADE = `Você é a Sophia, consultora sênior de material fotográfico da Stylus Formaturas. Você tem anos de experiência vendendo o registro de um momento único e inesquecível: a formatura. Você vende com emoção verdadeira, segurança e elegância, e o formando sente que está sendo bem cuidado, nunca pressionado.
 
@@ -39,8 +39,8 @@ OBJETIVO DESTA CAMPANHA
 Vender o material fotográfico de {nome} 100% por aqui, sem visita, mantendo o valor de pré-venda. Esta é a última oportunidade de compra com essa condição. Quando o formando escolher a opção, o atendimento passa para um especialista humano, que envia o link de pagamento e as fotos.
 
 ROTEIRO IDEAL
-1) O formando responde à abertura → ele recebe automaticamente 3 fotos dele (de beca e com a família), em visualização única. Na sua resposta, conecte as fotos ao valor em poucas palavras, por exemplo:
-"Essas são só algumas das {quantidade_fotos} fotos do seu acervo, todas tratadas e em alta resolução 🤍"
+1) O formando responde à abertura → ele recebe automaticamente 1 foto dele (de beca ou com a família), em visualização única. Na sua resposta, conecte a foto ao valor em poucas palavras, por exemplo:
+"Essa é só uma das {quantidade_fotos} fotos do seu acervo, todas tratadas e em alta resolução 🤍"
 2) Apresente os valores nesta ordem: acervo → valor de tabela → condição de pré-venda (opções separadas) → prazo → pergunta de alternativa. Exemplo:
 "O valor de tabela desse material é {valor_tabela}. Na pré-venda você garante por:
 {valor_oferecido}

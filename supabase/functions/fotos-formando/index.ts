@@ -403,7 +403,7 @@ async function escolherMelhor(imagens: string[], nome: string): Promise<{ indice
 }
 
 // ============================================================================
-// KIT DE FOTOS (campanha "Ultima Oportunidade"): 3 fotos, de preferencia
+// KIT DE FOTOS (campanhas "Ultima Oportunidade" e "Black Friday"): padrao 1 foto, de preferencia
 // o formando de beca e com a familia, em visualizacao unica
 // ============================================================================
 
@@ -438,7 +438,18 @@ async function escolherKit(imagens: string[], nome: string, quantidade: number):
   const chave = Deno.env.get('GEMINI_API_KEY');
   if (!chave || imagens.length <= quantidade) return { indices: padrao, motivo: 'padrao' };
   const parts: any[] = imagens.map((b64) => ({ inline_data: { mime_type: 'image/jpeg', data: b64 } }));
-  parts.push({
+  if (quantidade === 1) {
+    // Uma unica foto: a mais bonita e emocionante - de beca em destaque OU com a familia
+    parts.push({
+      text:
+        `Estas sao ${imagens.length} fotos (indices 0 a ${imagens.length - 1}, na ordem) da formatura de ${nome}. ` +
+        `Escolha a UNICA MELHOR foto para enviar a essa pessoa como previa, para ela sentir vontade de ter todas as fotos. ` +
+        `Pode ser: a) o/a formando/a DE BECA em destaque, rosto bem visivel e bonito (olhos abertos, de preferencia sorrindo); ` +
+        `ou b) o/a formando/a DE BECA COM A FAMILIA (pais, avos, filhos, parceiro), todos de frente, bem enquadrados e sorrindo. ` +
+        `Escolha a que tiver mais emocao e melhor qualidade. Evite fotos borradas, de costas, olhos fechados ou em que a pessoa aparece pequena. ` +
+        `Responda SOMENTE JSON: {"fotos": [{"indice": numero, "tipo": "beca" | "familia"}], "motivo": "frase curta"}.`,
+    });
+  } else parts.push({
     text:
       `Estas sao ${imagens.length} fotos (indices 0 a ${imagens.length - 1}, na ordem) da formatura de ${nome}. ` +
       `Escolha as ${quantidade} MELHORES (indices diferentes) para enviar a essa pessoa como previa, para ela sentir vontade de ter as fotos. ` +
@@ -690,12 +701,29 @@ serve(async (req) => {
 
     if (acao === 'pits_necessarios') {
       // Turmas (contratos) das campanhas de venda com formandos que ainda nao compraram
-      const { data: ccs } = await sb
-        .from('contatos_campanha')
-        .select('numero_contrato, status, campanhas!inner(tipo_atendimento)')
-        .eq('campanhas.tipo_atendimento', 'venda_material')
-        .not('status', 'in', '("comprou","sem_interesse")');
-      const pits = [...new Set((ccs || []).map((c: any) => String(c.numero_contrato || '').replace(/\D/g, '')).filter(Boolean))];
+      // So campanhas de venda ATIVAS (rascunho / em andamento / pausada): campanha concluida
+      // nao precisa mais de fotos, o que deixa a sincronizacao bem mais leve.
+      const { data: campsAtivas } = await sb
+        .from('campanhas')
+        .select('id')
+        .eq('tipo_atendimento', 'venda_material')
+        .neq('status', 'concluida');
+      const idsCamp = (campsAtivas || []).map((c: any) => c.id);
+      const pitsSet = new Set<string>();
+      for (let inicio = 0; idsCamp.length && inicio < 50000; inicio += 1000) {
+        const { data: ccs } = await sb
+          .from('contatos_campanha')
+          .select('numero_contrato')
+          .in('campanha_id', idsCamp)
+          .not('status', 'in', '("comprou","sem_interesse")')
+          .range(inicio, inicio + 999);
+        (ccs || []).forEach((c: any) => {
+          const pit = String(c.numero_contrato || '').replace(/\D/g, '');
+          if (pit) pitsSet.add(pit);
+        });
+        if (!ccs || ccs.length < 1000) break;
+      }
+      const pits = [...pitsSet];
       // Tokens das fotos vencem: re-sincroniza quem foi atualizado ha mais de 1 dia
       const limite = new Date(Date.now() - (body.forcar ? 0 : 1) * 86400000).toISOString();
       const { data: recentes } = await sb.from('meusalbuns_fotos').select('aluno_cript').gte('atualizado_em', limite);
@@ -800,7 +828,7 @@ serve(async (req) => {
       return json({ success: true, log: r.log });
     }
 
-    // Kit de fotos (campanha Ultima Oportunidade): texto curto + N fotos (padrao 3),
+    // Kit de fotos (Ultima Oportunidade / Black Friday): texto curto + N fotos (padrao 1),
     // de preferencia de beca e com a familia, em visualizacao unica. Uma vez por formando.
     //  legenda: texto enviado ANTES das fotos ({nome} = primeiro nome)
     if (acao === 'enviar_kit') {
@@ -808,7 +836,7 @@ serve(async (req) => {
       const manual = body.origem === 'manual';
       if (!manual && !cfg?.fotos_ativas) return json({ success: false, motivo: 'fotos_desativadas' });
 
-      const quantidade = Math.min(Math.max(Number(body.quantidade) || 3, 1), 5);
+      const quantidade = Math.min(Math.max(Number(body.quantidade) || 1, 1), 5);
       // Trava: so um envio do kit por formando, mesmo se ele mandar varias mensagens seguidas
       // (fotos_kit_enviadas: 0 = nunca enviado, -1 = enviando agora, -2 = falhou, >0 = quantidade enviada)
       const idCC = body.contato_campanha_id;

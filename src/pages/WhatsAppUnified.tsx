@@ -59,6 +59,8 @@ type VendaResumo = { id: string; valor: number; forma: string | null; data: stri
 const FORMAS_PAGAMENTO = ['Pix', 'Dinheiro', 'Cartão 2x', 'Cartão AC 2x', 'DCC', 'Boleto'];
 
 /** Divide uma lista em blocos (evita URL gigante e o limite de 1000 linhas do Supabase) */
+const LOTE_LISTA = 120;
+
 function emBlocos<T>(lista: T[], tamanho = 150): T[][] {
   const blocos: T[][] = [];
   for (let i = 0; i < lista.length; i += tamanho) blocos.push(lista.slice(i, i + tamanho));
@@ -88,6 +90,8 @@ export function WhatsAppUnified() {
   const [selectedContact, setSelectedContact] = useState<ContactWithLastMsg | null>(null);
   const [contactFilter, setContactFilter] = useState<ContactFilter>('todos');
   const [contactSearch, setContactSearch] = useState('');
+  // Desenha so os primeiros contatos da lista (desenhar milhares de uma vez travava a tela)
+  const [limiteLista, setLimiteLista] = useState(LOTE_LISTA);
   const [messageInput, setMessageInput] = useState('');
   const [sendingImage, setSendingImage] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -431,6 +435,17 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
       let campanhaByPhone = cache?.campanhas || new Map<string, CampanhaInfo>();
       let vendasPorChave = cache?.vendas || new Map<string, VendaResumo>();
 
+      const lastMsgPrimeiro = new Map<string, Message>();
+      (lastMessages || []).forEach((m: Message) => lastMsgPrimeiro.set(m.contact_id, m));
+      if (!cache && !silent) {
+        setContacts(
+          sortContactsByLastMessage(
+            (contactsData as Contact[]).map((contact) => ({ ...contact, lastMessage: lastMsgPrimeiro.get(contact.id) }))
+          )
+        );
+        setIsInitialLoading(false);
+      }
+
       if (precisaRecarregar) {
         // Agendamentos: busca em blocos de contatos (antes era uma consulta so com
         // todos os IDs na URL, que passava do limite e falhava em silencio -
@@ -642,7 +657,6 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
 
   // useMemo garante recalcular quando contacts mudar
   const filteredContacts = useMemo(() => {
-    console.log('[filteredContacts] Recalculando, total contacts:', contacts.length);
     const filtered = contacts.filter((c) => {
       const matchesFilter =
         contactFilter === 'todos' ||
@@ -658,9 +672,13 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
 
       return matchesFilter && matchesSearch;
     });
-    console.log('[filteredContacts] Filtrados:', filtered.length, 'Primeiro:', filtered[0]?.name);
     return filtered;
   }, [contacts, contactFilter, contactSearch]);
+
+  // Volta para o primeiro lote ao trocar filtro/busca
+  useEffect(() => {
+    setLimiteLista(LOTE_LISTA);
+  }, [contactFilter, contactSearch]);
 
   const handleSendMessage = async () => {
     if (!messageInput.trim() || !selectedContact) return;
@@ -1140,7 +1158,7 @@ const formatTime = (dateStr: string) => {
                   </p>
                 </div>
               ) : (
-                filteredContacts.map((contact) => {
+                filteredContacts.slice(0, limiteLista).map((contact) => {
                   const badge = getAssignmentBadge(contact.assigned_to);
                   const hasUnread = (contact.unread_count || 0) > 0;
                   const isSold = contact.vendaProdutoConcluida === true;
@@ -1263,6 +1281,16 @@ const formatTime = (dateStr: string) => {
                     </div>
                   );
                 })
+              )}
+              {filteredContacts.length > limiteLista && (
+                <button
+                  type="button"
+                  onClick={() => setLimiteLista((l) => l + LOTE_LISTA * 2)}
+                  className="w-full p-3 text-xs"
+                  style={{ color: 'var(--info)' }}
+                >
+                  Mostrar mais contatos ({filteredContacts.length - limiteLista} restantes)
+                </button>
               )}
             </div>
           </div>
