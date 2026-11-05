@@ -1585,7 +1585,25 @@ const formatTime = (dateStr: string) => {
                                 />
                               </a>
                             )}
-                            {!(msg.message_type && msg.message_type !== 'text' && /^\[.*\]$/.test(msg.content || '')) && (
+                            {msg.message_type === 'sticker' && msg.media_url && (
+                              <img src={msg.media_url} alt="Figurinha" className="mb-1" style={{ maxWidth: '120px', maxHeight: '120px', display: 'block' }} />
+                            )}
+                            {msg.message_type === 'video' && msg.media_url && (
+                              <video controls preload="none" src={msg.media_url} className="rounded mb-1" style={{ maxWidth: '240px', maxHeight: '240px', display: 'block' }} />
+                            )}
+                            {msg.message_type === 'document' && msg.media_url && (
+                              <a
+                                href={msg.media_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-2 p-2 rounded mb-1"
+                                style={{ backgroundColor: 'var(--bg-surface-raised)', color: 'var(--text-primary)', border: '1px solid var(--border-subtle)' }}
+                              >
+                                <Paperclip size={14} />
+                                <span className="text-xs font-medium">Abrir documento</span>
+                              </a>
+                            )}
+                            {!(msg.media_url && msg.message_type && msg.message_type !== 'text' && /^\[.*\]$/.test(msg.content || '')) && (
                               <p style={{ color: 'var(--text-primary)' }}>{msg.content}</p>
                             )}
                             <div className="flex items-center justify-end gap-1 mt-1">
