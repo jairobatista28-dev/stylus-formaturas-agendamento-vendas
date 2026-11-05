@@ -162,7 +162,8 @@ export async function sendMsg(phone: string, text: string): Promise<string> {
 
   const data = await res.json();
   console.log(`[Uazapi] Mensagem enviada com sucesso`);
-  return data?.key?.id || data?.id || data?.messageid || 'sent';
+  // messageid primeiro: e o id que a uazapi aceita para apagar a mensagem depois
+  return data?.messageid || data?.key?.id || data?.id || 'sent';
 }
 
 /**
@@ -219,7 +220,7 @@ export async function sendMedia(
   const data = await res.json();
   console.log(`[Uazapi] Midia enviada com sucesso`);
   return {
-    messageId: data?.key?.id || data?.id || data?.messageid || 'sent',
+    messageId: data?.messageid || data?.key?.id || data?.id || 'sent',
     fileUrl: data?.response?.fileUrl || data?.fileUrl || null,
   };
 }
@@ -366,4 +367,30 @@ function normalizeChatsResponse(data: any): UazapiChat[] {
       if (!/^([1-9]\d)$/.test(ddd)) return false;
       return true;
     });
+}
+
+/**
+ * Apaga uma mensagem enviada por nos PARA TODOS no WhatsApp (some do celular
+ * conectado e do cliente). O WhatsApp so permite isso com mensagens enviadas
+ * pelo proprio numero e dentro do prazo dele (cerca de 2 dias).
+ */
+export async function deleteMsg(waMessageId: string): Promise<void> {
+  let settings = getSettings();
+  if (!settings.apiUrl || !settings.apiToken) {
+    settings = await fetchSettingsFromSupabase();
+  }
+  if (!settings.apiUrl || !settings.apiToken) {
+    throw new Error('Configure as credenciais do WhatsApp em Configuracoes');
+  }
+  const baseUrl = settings.apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${baseUrl}/message/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'token': settings.apiToken },
+    body: JSON.stringify({ id: waMessageId }),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Uazapi erro ${res.status}: ${err}`);
+  }
+  console.log('[Uazapi] Mensagem apagada para todos:', waMessageId);
 }

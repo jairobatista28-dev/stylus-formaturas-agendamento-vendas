@@ -19,7 +19,7 @@ import {
   Clock,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { sendMsg, sendMedia } from '../lib/uazapi';
+import { sendMsg, sendMedia, deleteMsg } from '../lib/uazapi';
 import { useToast } from '../hooks/useToast';
 import { ToastContainer } from '../components/Toast';
 import { WhatsAppConnection } from '../components/WhatsAppConnection';
@@ -709,7 +709,7 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
 
     try {
       // Envia de verdade pelo WhatsApp via uazapiGO ANTES de gravar como enviada
-      await sendMsg(selectedContact.phone, textToSend);
+      const waMessageId = await sendMsg(selectedContact.phone, textToSend);
 
       const { error } = await supabase.from('messages').insert({
         contact_id: selectedContact.id,
@@ -718,6 +718,7 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
         sent_by: sentBy,
         delivered: true,
         read: false,
+        wa_message_id: waMessageId !== 'sent' ? waMessageId : null,
       });
 
       if (!error) {
@@ -764,7 +765,7 @@ fetchMessages(selectedContact.id);
       const legenda = messageInput.trim() || undefined;
       const sentBy = isManualMode ? 'manual' : 'ia';
 
-      const { fileUrl } = await sendMedia(selectedContact.phone, base64, 'image', legenda);
+      const { fileUrl, messageId: waMessageId } = await sendMedia(selectedContact.phone, base64, 'image', legenda);
 
       const { error } = await supabase.from('messages').insert({
         contact_id: selectedContact.id,
@@ -775,6 +776,7 @@ fetchMessages(selectedContact.id);
         read: false,
         message_type: 'image',
         media_url: fileUrl || base64,
+        wa_message_id: waMessageId !== 'sent' ? waMessageId : null,
       });
 
       if (!error) {
@@ -795,14 +797,35 @@ fetchMessages(selectedContact.id);
   };
 
   const handleDeleteMessage = async (messageId: string) => {
-    if (!confirm('Excluir esta mensagem?')) return;
+    // Busca no banco o id da mensagem no WhatsApp (a lista na tela pode nao ter)
+    const { data: info } = await supabase
+      .from('messages')
+      .select('direction, wa_message_id')
+      .eq('id', messageId)
+      .maybeSingle();
+    const podeApagarParaTodos = info?.direction === 'out' && !!info?.wa_message_id;
+
+    if (podeApagarParaTodos) {
+      if (!confirm('Apagar esta mensagem PARA TODOS? Ela some do sistema, do WhatsApp conectado e do cliente.')) return;
+      try {
+        await deleteMsg(info!.wa_message_id as string);
+      } catch (err) {
+        const motivo = err instanceof Error ? err.message : 'erro desconhecido';
+        if (!confirm(`Nao foi possivel apagar no WhatsApp (${motivo}). O WhatsApp so permite apagar para todos por cerca de 2 dias.\n\nApagar so do sistema?`)) return;
+      }
+    } else if (info?.direction === 'in') {
+      if (!confirm('Esta mensagem foi enviada pelo cliente. O WhatsApp nao permite apagar mensagem do cliente no celular dele.\n\nApagar so do sistema?')) return;
+    } else {
+      if (!confirm('Esta mensagem foi enviada antes da atualizacao e nao tem o codigo do WhatsApp, entao so pode ser apagada do sistema.\n\nApagar do sistema?')) return;
+    }
+
     const { error } = await supabase.from('messages').delete().eq('id', messageId);
     if (error) {
       showToast('Erro ao excluir mensagem', 'error');
       return;
     }
     setMessages((prev) => prev.filter((m) => m.id !== messageId));
-    showToast('Mensagem excluida', 'success');
+    showToast(podeApagarParaTodos ? 'Mensagem apagada para todos' : 'Mensagem excluida do sistema', 'success');
   };
 
   const handleDeleteContact = async (contactId: string) => {
