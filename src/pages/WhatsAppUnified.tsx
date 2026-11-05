@@ -408,10 +408,21 @@ const lastMessageIdRef = useRef<string | null>(null);
 const fetchContacts = async (silent = false, forcarLaterais = false) => {
   if (!silent) setIsInitialLoading(true);
   try {
-    const { data: contactsData, error } = await supabase
-      .from('contacts')
-      .select('*')
-      .order('created_at', { ascending: false });
+    // O Supabase devolve no maximo 1000 linhas por consulta: busca em paginas
+    // de 1000 para nao "sumir" contato quando a base passa desse numero.
+    let contactsData: any[] | null = [];
+    let error: any = null;
+    for (let inicio = 0; inicio < 50000; inicio += 1000) {
+      const { data: pagina, error: erroPagina } = await supabase
+        .from('contacts')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(inicio, inicio + 999);
+      if (erroPagina) { error = erroPagina; contactsData = null; break; }
+      contactsData.push(...(pagina || []));
+      if (!pagina || pagina.length < 1000) break;
+    }
 
     if (!error && contactsData) {
       const contactIds = contactsData.map((c) => c.id);
@@ -420,8 +431,18 @@ const fetchContacts = async (silent = false, forcarLaterais = false) => {
       // (evita o limite de 1000 linhas do PostgREST que fazia contatos
       // aparecerem como "Nenhuma mensagem" quando o total de mensagens
       // do sistema passava de 1000 - hoje ja sao milhares).
-      const { data: lastMessages, error: lastMessagesError } = await supabase
-        .rpc('get_last_messages', { p_contact_ids: contactIds });
+      // Em lotes de 1000 ids: a funcao tambem respeita o teto de 1000 linhas.
+      let lastMessages: any[] = [];
+      let lastMessagesError: any = null;
+      const lotesIds: string[][] = [];
+      for (let i = 0; i < contactIds.length; i += 1000) lotesIds.push(contactIds.slice(i, i + 1000));
+      const respostasLotes = await Promise.all(
+        lotesIds.map((lote) => supabase.rpc('get_last_messages', { p_contact_ids: lote }))
+      );
+      respostasLotes.forEach(({ data, error: e }: { data: any; error: any }) => {
+        if (e) lastMessagesError = e;
+        lastMessages.push(...((data as any[]) || []));
+      });
 
       if (lastMessagesError) {
         console.error('[WhatsApp] Erro ao buscar ultimas mensagens:', lastMessagesError);

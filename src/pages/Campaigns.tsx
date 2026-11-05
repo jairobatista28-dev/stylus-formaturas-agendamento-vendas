@@ -380,8 +380,20 @@ export function Campaigns() {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${supabaseKey}`,
           },
-        }).then(res => {
+        }).then(async (res) => {
           console.log('[Campaign] Dispatcher response status:', res.status);
+          // Mostra na tela POR QUE o disparo nao saiu (antes ficava so no F12)
+          const r = await res.json().catch(() => null);
+          if (!r) return;
+          if (r.pausado) {
+            showToast('Disparos PAUSADOS automaticamente (envios falharam). Confira o WhatsApp e clique em Retomar no painel Envio seguro.', 'error');
+          } else if (r.motivo === 'limite_diario') {
+            showToast(`Limite diário do Envio seguro atingido (${r.enviados_hoje}/${r.limite}). A fila continua amanhã, ou aumente o limite em Envio seguro > Configurar.`, 'error');
+          } else if (r.motivo === 'fora_do_horario') {
+            showToast('Fora do horário/dias de envio do Envio seguro. A fila sai sozinha quando abrir a janela (ajuste em Envio seguro > Configurar).', 'error');
+          } else if (r.error || r.success === false) {
+            showToast('Erro no disparo: ' + (r.error || r.erro || 'desconhecido'), 'error');
+          }
         }).catch((err) => console.warn('[Campaign] Dispatcher invoke error:', err));
       } else {
         console.error('[Campaign] Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
