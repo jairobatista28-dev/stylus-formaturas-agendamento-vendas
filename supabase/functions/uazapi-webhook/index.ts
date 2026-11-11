@@ -120,25 +120,98 @@ async function verificarDuplicata(
 }
 
 /**
- * Registra um evento webhook como processado.
- * Usa UPSERT para tratar message_id ausente (gera um fallback unico).
+ * Registra o evento de forma ATOMICA (INSERT puro, sem upsert).
+ * Retorna true se ESTA execucao ganhou o direito de processar a mensagem;
+ * false se outra execucao (reenvio da Uazapi) ja tinha registrado o mesmo ID.
+ * Antes era "checa e depois grava": dois webhooks chegando juntos passavam os
+ * dois pela checagem e a IA respondia 2 ou 3 vezes.
  */
 async function registrarEventoProcessado(
   sb: ReturnType<typeof createClient>,
   message_id: string,
   telefone: string,
   conteudo: string
-): Promise<void> {
-  const idFinal = message_id || `noid_${telefone}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+): Promise<boolean> {
+  // Sem ID: chave por telefone + conteudo + minuto (reenvios no mesmo minuto colidem)
+  const idFinal = message_id || `noid_${telefone}_${Math.floor(Date.now() / 60000)}_${hashSimples(conteudo)}`;
   const { error } = await sb
     .from('webhook_events_processados')
-    .upsert(
-      { message_id: idFinal, telefone, conteudo, processado_em: new Date().toISOString() },
-      { onConflict: 'message_id' }
-    );
+    .insert({ message_id: idFinal, telefone, conteudo, processado_em: new Date().toISOString() });
   if (error) {
+    if ((error as any).code === '23505') {
+      console.log(`[Dedup] Corrida detectada - outra execucao ja pegou "${idFinal}"`);
+      return false;
+    }
     console.warn(`[Dedup] Erro ao registrar evento processado:`, error.message);
   }
+  return true;
+}
+
+function hashSimples(t: string): string {
+  let h = 0;
+  for (let i = 0; i < t.length; i++) h = (Math.imul(31, h) + t.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36);
+}
+
+/**
+ * AGRUPAMENTO DE MENSAGENS (debounce): o formando costuma mandar 2-3 mensagens
+ * seguidas ("Oi" / "tudo bem?" / "quanto fica?"). Antes cada uma gerava uma
+ * resposta da IA. Agora cada mensagem entra num buffer, espera alguns segundos,
+ * e SO a ultima mensagem da rajada chama a IA, com todos os textos juntos.
+ * Retorna o texto combinado, ou null se uma mensagem mais nova vai responder.
+ */
+const ESPERA_AGRUPAMENTO_MS = 7000;
+async function aguardarRajadaDeMensagens(
+  sb: ReturnType<typeof createClient>,
+  telefone: string,
+  texto: string
+): Promise<string | null> {
+  const { data: meu, error } = await sb
+    .from('ia_buffer_mensagens')
+    .insert({ telefone, texto })
+    .select('id')
+    .single();
+  if (error || !meu) {
+    console.warn('[Agrupamento] Buffer indisponivel, seguindo sem agrupar:', error?.message);
+    return texto;
+  }
+
+  await new Promise((r) => setTimeout(r, ESPERA_AGRUPAMENTO_MS));
+
+  const { data: ultima } = await sb
+    .from('ia_buffer_mensagens')
+    .select('id')
+    .eq('telefone', telefone)
+    .eq('processado', false)
+    .order('id', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (ultima && ultima.id !== meu.id) {
+    console.log(`[Agrupamento] ${telefone}: chegou mensagem mais nova - ela responde por esta`);
+    return null;
+  }
+
+  // Reivindica (atomico) todas as mensagens pendentes desse telefone
+  const { data: pendentes } = await sb
+    .from('ia_buffer_mensagens')
+    .update({ processado: true })
+    .eq('telefone', telefone)
+    .eq('processado', false)
+    .lte('id', meu.id)
+    .select('id, texto');
+
+  if (!pendentes || pendentes.length === 0) {
+    console.log(`[Agrupamento] ${telefone}: mensagens ja reivindicadas por outra execucao`);
+    return null;
+  }
+
+  const textos = pendentes
+    .sort((a: any, b: any) => a.id - b.id)
+    .map((m: any) => String(m.texto || '').trim())
+    .filter(Boolean);
+  if (textos.length > 1) console.log(`[Agrupamento] ${telefone}: ${textos.length} mensagens agrupadas em 1 resposta`);
+  return textos.join('\n');
 }
 
 /**
@@ -1255,7 +1328,27 @@ async function executarFluxoCampanha(
 /**
  * Funcao Principal do Webhook
  */
+declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
+
+// Responde 200 para a Uazapi IMEDIATAMENTE e processa em segundo plano.
+// Antes o webhook so respondia depois da IA (Gemini + digitando + envio, 15-30s);
+// a Uazapi entendia como timeout e REENVIAVA o webhook -> IA respondia de novo.
 serve(async (req) => {
+  if (req.method === 'POST' && typeof EdgeRuntime !== 'undefined') {
+    const corpo = await req.text();
+    const copia = new Request(req.url, { method: 'POST', headers: req.headers, body: corpo });
+    EdgeRuntime.waitUntil(
+      processarWebhook(copia).catch((e) => console.error('[Webhook] Erro em segundo plano:', e))
+    );
+    return new Response(JSON.stringify({ success: true, recebido: true }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+  return processarWebhook(req);
+});
+
+async function processarWebhook(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
@@ -1307,7 +1400,7 @@ serve(async (req) => {
     }
 
     // Ignora mensagens enviadas pelo proprio bot
-    const fromMe = msg?.fromMe || data?.key?.fromMe;
+    const fromMe = msg?.fromMe || msg?.wasSentByApi || data?.key?.fromMe;
     if (fromMe) {
       return new Response(JSON.stringify({ success: true, message: 'Ignorado: enviado por mim' }), {
         status: 200,
@@ -1329,7 +1422,7 @@ serve(async (req) => {
     const legendaOuTexto = msg?.text || msg?.content?.text || (body as any).chat?.wa_lastMessageTextVote || '';
 
     // Extrai message_id de todos os locais possiveis do payload da uazapi
-    const rawMessageId = msg?.key?.id || data?.key?.id || (body as any).key?.id || '';
+    const rawMessageId = msg?.messageid || msg?.id || msg?.key?.id || data?.key?.id || (body as any).key?.id || '';
 
     // So descarta se nao tiver telefone, ou se nao tiver nem texto nem midia
     if (!telefoneCliente || (!legendaOuTexto && !ehMidia)) {
@@ -1372,7 +1465,7 @@ serve(async (req) => {
     //   1. Por message_id (se presente) — chave primaria na tabela de dedup
     //   2. Por telefone + conteudo + janela de 15s — cobre reenvios com IDs diferentes
     // ========================================================================
-    const JANELA_DEDUP_SEGUNDOS = 15;
+    const JANELA_DEDUP_SEGUNDOS = 60;
     const ehDuplicata = await verificarDuplicata(sb, rawMessageId, telefoneNormalizado, textoRecebido, JANELA_DEDUP_SEGUNDOS);
 
     if (ehDuplicata) {
@@ -1383,8 +1476,14 @@ serve(async (req) => {
       });
     }
 
-    // Registra o evento como processado o mais cedo possivel
-    await registrarEventoProcessado(sb, rawMessageId, telefoneNormalizado, textoRecebido);
+    // Registra o evento de forma atomica: se outra execucao ganhou a corrida, para aqui
+    const ganhouEvento = await registrarEventoProcessado(sb, rawMessageId, telefoneNormalizado, textoRecebido);
+    if (!ganhouEvento) {
+      return new Response(JSON.stringify({ success: true, message: 'Duplicata ignorada (corrida)' }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
     console.log(`[Webhook] Evento registrado como processado: msg_id="${rawMessageId}"`);
 
     // AUDIO: transcreve com o Gemini para a IA entender e o painel mostrar o texto
@@ -1540,6 +1639,18 @@ serve(async (req) => {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
+    }
+
+    // AGRUPAMENTO: so texto (e audio transcrito). Midia segue na hora.
+    if (!ehMidia || /^🎤/.test(textoRecebido)) {
+      const textoAgrupado = await aguardarRajadaDeMensagens(sb, telefoneNormalizado, textoRecebido);
+      if (textoAgrupado === null) {
+        return new Response(JSON.stringify({ success: true, message: 'Agrupada com mensagem mais nova' }), {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      textoRecebido = textoAgrupado;
     }
 
     // 0. Verifica se ha conversa_estado aguardando resposta (state machine)
@@ -1722,4 +1833,4 @@ serve(async (req) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
-});
+}
