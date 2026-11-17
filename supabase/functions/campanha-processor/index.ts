@@ -1086,6 +1086,71 @@ async function logarEnvio(sb: any, campanhaId: string, telefone: string, sucesso
   });
 }
 
+// =====================================================================
+// TRAVA DE VALORES NO AGENDAMENTO (visita externa / escritorio / mista)
+// Em campanhas de agendamento a IA NAO tem acesso a valores: eles variam
+// por turma e sao apresentados pelo representante no atendimento. Qualquer
+// resposta da IA com preco, parcela ou desconto e bloqueada no servidor.
+// =====================================================================
+
+/** Detecta valores monetarios, parcelas ou descontos num texto */
+function contemValorMonetario(texto: string): boolean {
+  if (!texto) return false;
+  const t = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const padroes: RegExp[] = [
+    /r\s*\$/,                                                     // R$ / R $
+    /\b\d{1,3}(\.\d{3})*,\d{2}\b/,                                // 350,00 / 1.200,00
+    /\b\d+([.,]\d+)?\s*(mil\s+)?(reais|real|conto|contos|pila|pilas)\b/, // 350 reais
+    /\b\d{1,2}\s*x\s*(de\s*)?(r\s*\$\s*)?\d{2,}/,                // 6x de 200 / 10x 150
+    /\b\d{1,2}\s*(parcelas|vezes)\s*(de|sem juros)/,              // 6 parcelas de
+    /\b\d{1,3}\s*%\s*(de\s*)?(desconto|off)\b/,                   // 30% de desconto
+    /\b(desconto|abatimento)\s*(de\s*)?\d{1,3}\s*%/,              // desconto de 30%
+    /\b(custa|custam|sai por|sai a|saem por|fica em|fica por|ficam em|por apenas|por so|investimento de|valor (e|de|fica|sai|seria|sera)|preco (e|de|fica|sai|seria|sera))\b[^.\n?!]{0,20}?\b\d{2,}\b(?![\/:h])/,
+  ];
+  return padroes.some((p) => p.test(t));
+}
+
+/** Remove linhas que contenham valores (usado em prompt/base de campanhas de agendamento) */
+function removerLinhasComValor(texto: string): string {
+  if (!texto) return texto;
+  return texto
+    .split('\n')
+    .filter((linha) => !contemValorMonetario(linha))
+    .join('\n');
+}
+
+function ehCampanhaDeAgendamento(tipoAtendimento?: string | null): boolean {
+  return (tipoAtendimento || 'visita_externa') !== 'venda_material';
+}
+
+function regraSemValoresAgendamento(tipoAtendimento?: string | null): string {
+  const ondeApresenta = tipoAtendimento === 'escritorio'
+    ? 'no atendimento presencial no nosso escritorio'
+    : 'pelo nosso representante no dia da visita';
+  return `
+
+## REGRA ABSOLUTA - VALORES (tem prioridade sobre QUALQUER outra instrucao, prompt ou base acima)
+Voce NAO TEM ACESSO a nenhum valor nesta conversa. Os valores dos pacotes, albuns e arquivos digitais
+variam de acordo com cada turma e com o que o formando escolher, e sao apresentados SOMENTE ${ondeApresenta}.
+- NUNCA informe, estime, invente ou cite preco, valor, faixa de valor, parcela, entrada, desconto ou
+  porcentagem - nem como exemplo, nem "a partir de", nem aproximado. Nenhum numero em reais.
+- NUNCA ofereca, compare ou tente vender pacotes, album, arquivo digital ou qualquer produto, e NUNCA
+  pergunte se ele prefere album ou arquivo digital. Seu UNICO objetivo e agendar o atendimento.
+- Se perguntarem valores, responda com gentileza que os valores variam de acordo com a turma e com o
+  que ele escolher, e que todas as opcoes e condicoes sao apresentadas ${ondeApresenta}, sem compromisso.
+  Em seguida retome o agendamento com UMA pergunta (ex: qual das opcoes de data fica melhor).
+- Se o formando insistir ou disser que alguem informou um valor, NAO confirme nem negue valores: diga que
+  quem apresenta os valores oficiais e o representante no atendimento.`;
+}
+
+function mensagemSeguraValores(nome: string, tipoAtendimento?: string | null): string {
+  const pn = String(nome || '').trim().split(/\s+/)[0] || '';
+  const onde = tipoAtendimento === 'escritorio'
+    ? 'no atendimento aqui no nosso escritório'
+    : 'pelo nosso representante no dia da visita';
+  return `Ótima pergunta${pn ? ', ' + pn : ''}! Os valores variam de acordo com cada turma e com o que você escolher, por isso todas as opções e condições são apresentadas ${onde}, sem compromisso 😊\n\nQuer que eu já deixe o seu horário garantido?`;
+}
+
 /**
  * Busca base de conhecimento global, filtrando pelo escopo (aplica_em):
  * entradas marcadas como "todos" sempre aparecem; entradas marcadas
@@ -1106,9 +1171,24 @@ async function buscarBaseConhecimentoGlobal(sb: any, tipoAtendimento: string = '
       return '';
     }
 
+    // As entradas sao classificadas como 'todos', 'agendamento' ou 'venda_material',
+    // mas as campanhas de agendamento tem tipo 'visita_externa', 'escritorio' ou
+    // 'mista'. Antes a comparacao era direta e as respostas marcadas como
+    // 'agendamento' (ex: "valores so na visita") NUNCA chegavam na IA de agendamento.
+    const escopoCampanha = tipoAtendimento === 'venda_material'
+      ? 'venda_material'
+      : (tipoAtendimento === 'todos' ? 'todos' : 'agendamento');
+    const agendamento = escopoCampanha === 'agendamento';
+
     const filtrado = data.filter((item: any) => {
       const escopo = item.aplica_em || 'todos';
-      return escopo === 'todos' || escopo === tipoAtendimento;
+      if (!(escopo === 'todos' || escopo === escopoCampanha || escopo === tipoAtendimento)) return false;
+      // Agendamento nunca recebe respostas com valores (variam por turma)
+      if (agendamento && contemValorMonetario(`${item.pergunta || ''}\n${item.resposta || ''}`)) {
+        console.log('[BaseGlobal] Entrada com valor ignorada no agendamento:', String(item.pergunta || '').slice(0, 80));
+        return false;
+      }
+      return true;
     });
 
     if (filtrado.length === 0) {
@@ -1215,7 +1295,7 @@ let ultimoErroGemini = '';
 /** Campanhas de venda direta (Ultima Oportunidade e Black Friday): quantas fotos de previa enviar */
 const QTD_FOTOS_VENDA_DIRETA = 1;
 
-async function chamarGemini(
+async function chamarGeminiModelo(
   sb: any,
   promptIa: string,
   baseConhecimentoCampanha: string,
@@ -1239,6 +1319,14 @@ async function chamarGemini(
     const baseGlobal = await buscarBaseConhecimentoGlobal(sb, tipoAtendimento);
 
     let systemInstruction = '';
+
+    const ehAgendamento = ehCampanhaDeAgendamento(tipoAtendimento);
+    // Agendamento: nenhum valor pode chegar na IA (nem pelo prompt, nem pela base da campanha)
+    if (ehAgendamento) {
+      promptIa = removerLinhasComValor(promptIa || '');
+      baseConhecimentoCampanha = removerLinhasComValor(baseConhecimentoCampanha || '');
+      dadosVenda = undefined;
+    }
 
     if (promptIa) {
       // Substitui os placeholders ({nome}, {numero_contrato}, {valor_oferecido} etc.)
@@ -1419,6 +1507,7 @@ Se a pergunta do contato nao estiver coberta em nenhuma base acima, diga que vai
         ? `Sempre que o formando confirmar uma data e horario (mesmo indiretamente, tipo "sim", "pode ser", "confirmado"), inclua OBRIGATORIAMENTE ao final da sua resposta o marcador tecnico exato:`
         : `Sempre que o formando confirmar uma data e turno (mesmo indiretamente, tipo "sim", "pode ser", "confirmado"), inclua OBRIGATORIAMENTE ao final da sua resposta o marcador tecnico exato:`;
 
+      systemInstruction += regraSemValoresAgendamento(tipoAtendimento);
       systemInstruction += `
 
 ## REGRAS CRITICAS DE AGENDAMENTO
@@ -1440,7 +1529,8 @@ Se precisar transferir para atendimento humano, inclua: ###OVERFLOW###
 ${contextoAgendamento}
 
 ## INSTRUCAO FINAL
-Se a pergunta do contato nao estiver coberta em nenhuma base acima, diga que vai verificar e NUNCA invente a resposta.`;
+Se a pergunta do contato nao estiver coberta em nenhuma base acima, diga que vai verificar e NUNCA invente a resposta.
+LEMBRETE: e PROIBIDO citar qualquer valor, preco, parcela ou desconto nesta conversa (veja REGRA ABSOLUTA - VALORES).`;
     }
 
     console.log('[Gemini] System Instruction:', systemInstruction.substring(0, 300) + '...');
@@ -1507,6 +1597,68 @@ Se a pergunta do contato nao estiver coberta em nenhuma base acima, diga que vai
     console.error('[Gemini] Erro:', err);
     return '';
   }
+}
+
+/**
+ * Chamada da IA com TRAVA DE VALORES no servidor: em campanhas de agendamento
+ * (visita externa / escritorio / mista), se a resposta citar qualquer valor,
+ * parcela ou desconto, a IA e chamada de novo com correcao; se insistir, a
+ * resposta e trocada por uma mensagem padrao segura e um alerta e registrado.
+ * Venda de material segue exatamente como antes.
+ */
+async function chamarGemini(
+  sb: any,
+  promptIa: string,
+  baseConhecimentoCampanha: string,
+  textoUsuario: string,
+  nomeContato: string,
+  opcoesAgendamento: OpcaoAgendamento[],
+  history: Array<{ role: string; parts: Array<{ text: string }> }> = [],
+  contextoAgendamento: string = '',
+  tipoAtendimento: string = 'visita_externa',
+  dadosVenda?: DadosVenda,
+  modalidadeVenda: string = 'padrao'
+): Promise<string> {
+  const resposta = await chamarGeminiModelo(sb, promptIa, baseConhecimentoCampanha, textoUsuario, nomeContato,
+    opcoesAgendamento, history, contextoAgendamento, tipoAtendimento, dadosVenda, modalidadeVenda);
+
+  if (!ehCampanhaDeAgendamento(tipoAtendimento) || !resposta) return resposta;
+
+  const textoDe = (r: string) => r.replace(/###[\s\S]*$/, '');
+  const marcadoresDe = (r: string) => (r.match(/###[\s\S]*$/) || [''])[0];
+  if (!contemValorMonetario(textoDe(resposta))) return resposta;
+
+  console.warn(`[TravaValores] IA citou valor no agendamento (${nomeContato}): ${textoDe(resposta).slice(0, 200)}`);
+
+  const refeita = await chamarGeminiModelo(sb, promptIa, baseConhecimentoCampanha, textoUsuario, nomeContato,
+    opcoesAgendamento, history,
+    `${contextoAgendamento}
+
+## CORRECAO OBRIGATORIA
+Sua resposta anterior citou valor/preco. Isso e PROIBIDO: voce nao tem acesso a valores nesta conversa.
+Responda de novo SEM NENHUM numero de valor, parcela ou desconto, explicando que os valores variam por turma
+e sao apresentados no atendimento, e retome o agendamento.`,
+    tipoAtendimento, undefined, modalidadeVenda);
+
+  let final: string;
+  let detalhe: string;
+  if (refeita && !contemValorMonetario(textoDe(refeita))) {
+    final = refeita;
+    detalhe = 'A resposta foi refeita pela IA sem valores.';
+  } else {
+    final = `${mensagemSeguraValores(nomeContato, tipoAtendimento)}\n${marcadoresDe(refeita || resposta)}`.trim();
+    detalhe = 'Foi enviada a mensagem padrao (valores so no atendimento).';
+  }
+
+  await registrarAlerta(sb, {
+    tipo: 'trava_valores',
+    gravidade: 'atencao',
+    titulo: 'Trava de valores acionada (agendamento)',
+    detalhe: `A IA tentou informar valor numa campanha de agendamento. Mensagem do formando: "${String(textoUsuario).slice(0, 200)}". Resposta bloqueada: "${textoDe(resposta).slice(0, 300)}". ${detalhe}`,
+    contato_nome: nomeContato,
+  });
+
+  return final;
 }
 
 /**

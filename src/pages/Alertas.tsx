@@ -47,6 +47,7 @@ const TIPOS: Record<string, { rotulo: string; icone: typeof AlertTriangle }> = {
   audio_falhou: { rotulo: 'Áudios não transcritos', icone: MicOff },
   agendamento_conferir: { rotulo: 'Agendamentos a conferir', icone: CalendarCheck },
   trava_escolha: { rotulo: 'Travas de escolha', icone: ShieldAlert },
+  trava_valores: { rotulo: 'Travas de valores (agendamento)', icone: ShieldAlert },
   ia_sem_resposta: { rotulo: 'IA sem resposta', icone: Bot },
 };
 
