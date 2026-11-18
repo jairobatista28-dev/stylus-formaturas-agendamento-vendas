@@ -2219,14 +2219,17 @@ pergunte qual prefere. Nao repita o aviso da prorrogacao inteiro, ele ja recebeu
   if (contactId) {
     // Pega as ULTIMAS 30 mensagens (antes pegava as 20 primeiras, e em conversas
     // longas a IA perdia o contexto recente e se reapresentava)
-    // Ultima Oportunidade: o historico comeca na abertura DESTA campanha. Conversas antigas
-    // (ex: de agendamento de visita) nao entram, para a IA nao confundir os assuntos.
+    // Toda campanha de VENDA (padrao, Ultima Oportunidade e Black Friday): o historico comeca
+    // na abertura DESTA campanha. Conversas antigas (ex: de agendamento de visita, onde a IA
+    // diz que "os valores sao apresentados na visita") nao entram, para a IA nao confundir os
+    // assuntos. Campanhas de agendamento seguem lendo o historico completo, como antes.
+    const cortarHistoricoNaAbertura = campanha.tipo_atendimento === 'venda_material';
     let consultaMsgs = sb
       .from('messages')
       .select('*')
       .eq('contact_id', contactId);
     const inicioCampanha = dadosContato.abertura_enviada_em || dadosContato.primeiro_envio_em;
-    if (ehUltimaOportunidade && inicioCampanha) {
+    if (cortarHistoricoNaAbertura && inicioCampanha) {
       consultaMsgs = consultaMsgs.gte('created_at', new Date(new Date(inicioCampanha).getTime() - 2 * 60000).toISOString());
     }
     const { data: mensagensDesc } = await consultaMsgs
@@ -2246,9 +2249,9 @@ pergunte qual prefere. Nao repita o aviso da prorrogacao inteiro, ele ja recebeu
       history.pop();
     }
 
-    // Gemini exige que o historico comece com 'user'. Na Ultima Oportunidade a conversa
+    // Gemini exige que o historico comece com 'user'. Nas campanhas de venda a conversa
     // comeca com a NOSSA abertura: em vez de descartar a abertura, abre com um turno de contexto.
-    if (ehUltimaOportunidade && history.length > 0 && history[0].role !== 'user') {
+    if (cortarHistoricoNaAbertura && inicioCampanha && history.length > 0 && history[0].role !== 'user') {
       history.unshift({ role: 'user', parts: [{ text: '[Contexto interno: a conversa desta campanha comeca com a mensagem de abertura enviada pela Stylus logo abaixo.]' }] });
     }
     while (history.length > 0 && history[0].role !== 'user') {
